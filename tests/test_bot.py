@@ -1,21 +1,32 @@
+import asyncio
 import tempfile
 import unittest
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
 
 from cryptography.fernet import Fernet
 
 from bilim_neo.automation import due_bells, first_bell, quiet_now
 from bilim_neo.bot_store import BotStore
-from bilim_neo.bot_views import schedule_view, marks_view, advice_view
+from bilim_neo.bot_views import schedule_view, marks_view, advice_view, dashboard_view, day, parse_day, week_view
 from bilim_neo import bot
 
 
 SCHEDULE = {"days": [{"date": "28.09.2026", "day": "Понедельник", "subjects": [
     {"label": "Математика <сложно>", "timeslot": "08:00–08:45", "cabinet": "12", "homeworkBody": "№ 10 & 11"}
 ]}]}
+LOCALIZED_SCHEDULE = {"date": "28.09.2026", "days": [
+    {"date": "28 сентября", "day": "понедельник", "subjects": [
+        {"label": "Математика", "timeslot": "08:30 - 09:15", "homeworkBody": "№ 10"},
+        {"label": "История", "timeslot": "09:25 - 10:10", "homeworkBody": "", "hasFiles": True},
+    ]},
+    {"date": "29 сентября", "day": "вторник", "subjects": [
+        {"label": "Литература", "timeslot": "08:30 - 09:15", "homeworkBody": "Прочитать главу"},
+    ]},
+]}
 
 
 class ViewsTest(unittest.TestCase):
@@ -26,7 +37,52 @@ class ViewsTest(unittest.TestCase):
 
     def test_homework_and_empty_day(self):
         self.assertIn("№ 10 &amp; 11", schedule_view(SCHEDULE, date(2026, 9, 28), "homework"))
-        self.assertIn("нет данных", schedule_view(SCHEDULE, date(2026, 9, 29)))
+        self.assertIn("не вернул расписание", schedule_view(SCHEDULE, date(2026, 9, 29)))
+
+    def test_live_api_date_shape_powers_each_distinct_view(self):
+        target = date(2026, 9, 28)
+        self.assertIsNotNone(day(LOCALIZED_SCHEDULE, target))
+        lessons = schedule_view(LOCALIZED_SCHEDULE, target)
+        bells = schedule_view(LOCALIZED_SCHEDULE, target, "bells")
+        homework = schedule_view(LOCALIZED_SCHEDULE, target, "homework")
+        self.assertIn("Математика", lessons)
+        self.assertIn("08:30–09:15", bells)
+        self.assertIn("перемена 10 мин", bells)
+        self.assertIn("№ 10", homework)
+        self.assertIn("прикреплён файл", homework)
+        self.assertNotEqual(lessons, bells)
+        self.assertNotEqual(lessons, homework)
+        self.assertIn("ДЗ: 2", week_view(LOCALIZED_SCHEDULE, target))
+        self.assertIn("2 урока", dashboard_view(LOCALIZED_SCHEDULE, target, datetime(2026, 9, 28, 8, 40)))
+
+    def test_localized_date_chooses_nearest_year_at_new_year(self):
+        self.assertEqual(parse_day("01 января", date(2025, 12, 29)), date(2026, 1, 1))
+        self.assertEqual(parse_day("31 декабря", date(2026, 1, 1)), date(2025, 12, 31))
+
+    def test_week_and_day_buttons_open_distinct_destinations(self):
+        tabs = [button.callback_data for button in bot.date_keyboard("day", 0).inline_keyboard[0]]
+        self.assertEqual(tabs, ["view:day:0", "view:bells:0", "view:homework:0"])
+        days = [button.callback_data for row in bot.week_keyboard(0).inline_keyboard for button in row
+                if button.callback_data.startswith("view:day:")]
+        self.assertEqual(len(days), 7)
+        self.assertEqual(len(set(days)), 7)
+        distant_days = [int(button.callback_data.split(":")[-1])
+                        for row in bot.week_keyboard(8).inline_keyboard for button in row
+                        if button.callback_data.startswith("view:day:")]
+        self.assertTrue(all(abs(offset) <= bot.MAX_DAY_OFFSET for offset in distant_days))
+
+    def test_callbacks_route_to_the_selected_view(self):
+        fake_store = SimpleNamespace(user=lambda chat_id: {"profile": {"currentEduYear": 2026}})
+        for callback, expected in (("view:day:0", "day"), ("view:bells:0", "bells"),
+                                   ("view:homework:0", "homework"), ("view:week:0", "week")):
+            with self.subTest(callback=callback), patch.object(bot, "store", fake_store, create=True), \
+                 patch.object(bot.asyncio, "to_thread", new_callable=AsyncMock, return_value="<b>Ответ</b>") as thread, \
+                 patch.object(bot, "present", new_callable=AsyncMock) as present:
+                message = SimpleNamespace(chat=SimpleNamespace(id=7, type="private"), answer=AsyncMock())
+                query = SimpleNamespace(data=callback, message=message, answer=AsyncMock())
+                asyncio.run(bot.view(query))
+                self.assertEqual(thread.call_args.args[2], expected)
+                self.assertEqual(present.call_args.args[1], "<b>Ответ</b>")
 
     def test_marks_and_advice(self):
         marks = [{"subject": "Алгебра", "date": "28.09.2026", "regular_mark": 4, "regular_max": 10}]
@@ -75,9 +131,13 @@ class StoreTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             store = BotStore(str(Path(tmp) / "neo.sqlite3"), Fernet.generate_key().decode())
             store.save_user(7, "student", "password", {"fio": "Student"})
+            tomorrow = datetime.now(ZoneInfo("Asia/Almaty")).date() + timedelta(days=1)
+            store.set_snapshot(7, "homework", {"date": tomorrow.isoformat(), "data": {"legacy": "wrong empty snapshot"}})
             scores = []
 
             class FakeClient:
+                session = type("Session", (), {"close": lambda self: None})()
+
                 def get_current_marks(self, period):
                     return scores.copy()
 

@@ -1,7 +1,17 @@
 """Pure formatting and analysis helpers for the Telegram interface."""
 
-from datetime import date, datetime
+import re
+from datetime import date, datetime, timedelta
 from html import escape
+
+
+MONTHS = {
+    "января": 1, "февраля": 2, "марта": 3, "апреля": 4,
+    "мая": 5, "июня": 6, "июля": 7, "августа": 8,
+    "сентября": 9, "октября": 10, "ноября": 11, "декабря": 12,
+}
+WEEKDAYS = ("понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье")
+SHORT_WEEKDAYS = ("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")
 
 
 def h(value):
@@ -23,15 +33,56 @@ def fit(lines, separator="\n", limit=3900):
     return separator.join(kept)
 
 
-def parse_day(value):
-    try:
-        return datetime.strptime(value, "%d.%m.%Y").date()
-    except (TypeError, ValueError):
+def parse_day(value, reference: date | None = None):
+    """Parse API dates including Russian `29 сентября` without a year.
+
+    Infer the year nearest to the requested week, including New Year weeks.
+    """
+    if isinstance(value, date):
+        return value.date() if isinstance(value, datetime) else value
+    if not isinstance(value, str):
         return None
+    for pattern in ("%d.%m.%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(value.strip(), pattern).date()
+        except ValueError:
+            pass
+    match = re.fullmatch(r"\s*(\d{1,2})\s+([а-яё]+)\.?\s*", value.casefold())
+    if not match:
+        return None
+    month = MONTHS.get(match.group(2))
+    if month is None:
+        return None
+    anchor = reference or date.today()
+    candidates = []
+    for year in (anchor.year - 1, anchor.year, anchor.year + 1):
+        try:
+            candidates.append(date(year, month, int(match.group(1))))
+        except ValueError:
+            pass
+    return min(candidates, key=lambda candidate: abs((candidate - anchor).days)) if candidates else None
 
 
 def day(schedule, target: date):
-    return next((row for row in schedule.get("days", []) if parse_day(row.get("date")) == target), None)
+    return next((row for row in schedule.get("days", []) if parse_day(row.get("date"), target) == target), None)
+
+
+def lesson_count(number):
+    if number % 10 == 1 and number % 100 != 11:
+        return f"{number} урок"
+    if 2 <= number % 10 <= 4 and not 12 <= number % 100 <= 14:
+        return f"{number} урока"
+    return f"{number} уроков"
+
+
+def times(timeslot):
+    found = re.findall(r"(?<!\d)(?:[01]?\d|2[0-3]):[0-5]\d", str(timeslot or ""))
+    return found[:2]
+
+
+def minutes(clock):
+    hours, minute = map(int, clock.split(":"))
+    return hours * 60 + minute
 
 
 def lesson_lines(lessons, show_homework=False):
@@ -39,7 +90,8 @@ def lesson_lines(lessons, show_homework=False):
         return ["Занятий нет. Можно выдохнуть ✨"]
     result = []
     for index, item in enumerate(lessons, 1):
-        result.append(f"<b>{index:02d} · {h(item.get('label') or 'Урок')}</b>  <code>{h(item.get('timeslot') or '—')}</code>")
+        slot = "–".join(times(item.get("timeslot"))) or "—"
+        result.append(f"<b>{index:02d} · {h(item.get('label') or 'Урок')}</b>  <code>{slot}</code>")
         details = []
         if item.get("cabinet"):
             details.append(f"каб. {h(item['cabinet'])}")
@@ -56,30 +108,104 @@ def lesson_lines(lessons, show_homework=False):
 
 def schedule_view(schedule, target: date, mode="lessons"):
     selected = day(schedule, target)
-    title = {"lessons": "Расписание", "homework": "Домашнее задание", "bells": "Звонки"}[mode]
-    lines = [f"<b>{title} · {target:%d.%m.%Y}</b>", ""]
+    title = {"lessons": "📅 Уроки", "homework": "📝 Домашнее задание", "bells": "🔔 Звонки"}[mode]
+    lines = [f"<b>{title}</b> · {WEEKDAYS[target.weekday()]}, {target:%d.%m}", ""]
     if not selected:
-        lines.append("В дневнике нет данных на этот день.")
+        lines.append("На этот день BilimClass не вернул расписание. Попробуй выбрать соседний день.")
     elif selected.get("isHoliday"):
-        lines.append("Сегодня выходной 🌿")
+        lines.append("Выходной день 🌿")
     elif mode == "bells":
-        lines += [f"{i:02d}  <code>{h(s.get('timeslot') or '—')}</code>  {h(s.get('label') or 'Урок')}" for i, s in enumerate(selected.get("subjects", []), 1)] or ["Звонков нет."]
+        lessons = selected.get("subjects") or []
+        lines.append(f"{lesson_count(len(lessons))} · время из дневника")
+        lines.append("")
+        for index, item in enumerate(lessons, 1):
+            slot = times(item.get("timeslot"))
+            lines.append(f"<code>{'–'.join(slot) or '—'}</code>  <b>{index:02d}</b> · {h(item.get('label') or 'Урок')}")
+            if len(slot) == 2 and index < len(lessons):
+                next_slot = times(lessons[index].get("timeslot"))
+                if next_slot:
+                    pause = minutes(next_slot[0]) - minutes(slot[1])
+                    if 0 < pause <= 60:
+                        lines.append(f"   ↳ перемена {pause} мин")
+        if not lessons:
+            lines.append("Звонков нет.")
     elif mode == "homework":
-        homework = [s for s in selected.get("subjects", []) if s.get("homeworkBody")]
-        lines += [f"<b>{h(s.get('label') or 'Урок')}</b>\n{h(s['homeworkBody'])[:900]}" for s in homework] or ["Домашних заданий на этот день нет."]
+        homework = [s for s in selected.get("subjects", []) if s.get("homeworkBody") or s.get("hasFiles") or s.get("homeworkBooks")]
+        lines.append(f"Задания по {len(homework)} предметам" if homework else "Домашних заданий на этот день нет.")
+        for item in homework:
+            lines.extend(("", f"<b>{h(item.get('label') or 'Урок')}</b>"))
+            if item.get("homeworkBody"):
+                lines.append(h(item["homeworkBody"])[:900])
+            if item.get("hasFiles"):
+                lines.append("📎 К заданию прикреплён файл в BilimClass")
+            if item.get("homeworkBooks") and not item.get("homeworkBody"):
+                lines.append("📚 Есть задание в учебнике")
     else:
-        lines += lesson_lines(selected.get("subjects", []))
+        lessons = selected.get("subjects") or []
+        lines.append(lesson_count(len(lessons)))
+        lines.append("")
+        lines += lesson_lines(lessons)
     return fit(lines)
 
 
-def week_view(schedule):
-    lines = ["<b>Неделя в школе</b>", ""]
-    for row in schedule.get("days", []):
+def week_view(schedule, reference: date | None = None):
+    anchor = reference or parse_day(schedule.get("date")) or date.today()
+    rows = schedule.get("days") or []
+    if not rows:
+        return "<b>🗓 Неделя</b>\nBilimClass не вернул расписание на эту неделю."
+    lines = [f"<b>🗓 Неделя · {anchor:%d.%m}–{(anchor + timedelta(days=6)):%d.%m}</b>", "Выбери день кнопкой ниже, чтобы открыть уроки, звонки или ДЗ.", ""]
+    for row in rows:
         subjects = row.get("subjects") or []
-        lines.append(f"<b>{h(row.get('day') or row.get('date'))} · {h(row.get('date'))}</b>  {len(subjects)} уроков")
-        if subjects:
-            lines.append("  " + " · ".join(h(s.get("label") or "Урок") for s in subjects)[:220])
-    return fit(lines or ["Нет расписания."])
+        parsed = parse_day(row.get("date"), anchor)
+        weekday = SHORT_WEEKDAYS[parsed.weekday()] if parsed else h(row.get("day") or "День")
+        date_label = parsed.strftime("%d.%m") if parsed else h(row.get("date"))
+        if row.get("isHoliday") or not subjects:
+            lines.append(f"<b>{weekday} {date_label}</b> · {'выходной' if row.get('isHoliday') else 'уроков нет'}")
+            continue
+        homework = sum(bool(s.get("homeworkBody") or s.get("hasFiles") or s.get("homeworkBooks")) for s in subjects)
+        first, last = times(subjects[0].get("timeslot")), times(subjects[-1].get("timeslot"))
+        span = f" · {first[0]}–{last[-1]}" if first and last else ""
+        lines.append(f"<b>{weekday} {date_label}</b> · {lesson_count(len(subjects))}{span} · ДЗ: {homework}")
+    return fit(lines)
+
+
+def dashboard_view(schedule, target: date, now: datetime):
+    selected = day(schedule, target)
+    lines = [f"<b>НЭО · {WEEKDAYS[target.weekday()]}, {target:%d.%m}</b>", ""]
+    if not selected:
+        lines.append("Расписание на сегодня пока недоступно. Открой неделю или попробуй позже.")
+        return fit(lines)
+    lessons = selected.get("subjects") or []
+    if selected.get("isHoliday") or not lessons:
+        lines.append("Сегодня свободный день 🌿")
+        return fit(lines)
+    lines.append(f"<b>{lesson_count(len(lessons))}</b> сегодня")
+    now_minute = now.hour * 60 + now.minute
+    current = None
+    upcoming = None
+    for item in lessons:
+        slot = times(item.get("timeslot"))
+        if not slot:
+            continue
+        start = minutes(slot[0])
+        end = minutes(slot[1]) if len(slot) > 1 else start + 45
+        if start <= now_minute < end:
+            current = (item, slot)
+        elif start > now_minute and upcoming is None:
+            upcoming = (item, slot)
+    if current:
+        item, slot = current
+        lines.append(f"Сейчас · <b>{h(item.get('label') or 'Урок')}</b> до {slot[-1]}")
+    if upcoming:
+        item, slot = upcoming
+        lines.append(f"Дальше · <b>{h(item.get('label') or 'Урок')}</b> в {slot[0]}")
+    elif not current:
+        lines.append("Уроки на сегодня закончились.")
+    homework = sum(bool(item.get("homeworkBody") or item.get("hasFiles") or item.get("homeworkBooks")) for item in lessons)
+    if homework:
+        lines.append(f"📝 ДЗ на сегодня: {homework}")
+    lines.append("\nОткрой нужный раздел ниже.")
+    return fit(lines)
 
 
 def mark_lines(marks, limit=20):

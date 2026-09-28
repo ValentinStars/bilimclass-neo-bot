@@ -20,12 +20,15 @@ from dotenv import load_dotenv
 
 from .bot_store import BotStore
 from .automation import due_bells, quiet_now
-from .bot_views import (advice_view, attendance_view, day, grades_view, h,
-                        marks_view, schedule_view, week_view, parse_day)
+from .bot_views import (advice_view, attendance_view, dashboard_view, day,
+                        grades_view, h, marks_view, parse_day, schedule_view,
+                        week_view)
 from .client import BilimClassClient
 
 
 TZ = ZoneInfo("Asia/Almaty")
+MAX_DAY_OFFSET = 63
+MAX_WEEK_OFFSET = 8
 router = Router()
 store: BotStore
 logger = logging.getLogger(__name__)
@@ -46,8 +49,8 @@ def buttons(*rows):
 def home_keyboard():
     return buttons(
         [("📅 Сегодня", "view:day:0"), ("🌅 Завтра", "view:day:1")],
-        [("🗓 Неделя", "view:week"), ("🔔 Звонки", "view:bells:0")],
-        [("📝 Домашка", "view:homework:1"), ("📊 Оценки", "view:marks")],
+        [("🗓 Неделя", "view:week:0"), ("🔔 Звонки", "view:bells:0")],
+        [("📝 ДЗ сегодня", "view:homework:0"), ("📊 Оценки", "view:marks")],
         [("📈 Табель", "view:grades"), ("🏃 Посещаемость", "view:attendance")],
         [("💡 Советы", "view:advice"), ("⚙️ Настройки", "view:settings")],
     )
@@ -59,7 +62,7 @@ def back_keyboard():
 
 async def present(call: CallbackQuery, content: str, markup):
     """Reuse the current panel; keep delivered alerts as a readable history."""
-    alert = (call.message.text or "").startswith(("📊 Новые", "🏃 Новые", "📝 Обновилась", "📅 Изменилось", "Доброе утро", "Скоро урок"))
+    alert = (call.message.text or "").startswith(("📊 Новые", "🏃 Новые", "📝 Обновилась", "📅 Изменилось", "Доброе утро", "Скоро урок", "План недели"))
     if alert:
         await call.message.answer(content, reply_markup=markup, protect_content=True)
         return
@@ -71,10 +74,37 @@ async def present(call: CallbackQuery, content: str, markup):
 
 
 def date_keyboard(mode, offset):
+    week_offset = (datetime.now(TZ).date().weekday() + offset) // 7
+    modes = (("day", "Уроки"), ("bells", "Звонки"), ("homework", "ДЗ"))
+    move = []
+    if offset > -MAX_DAY_OFFSET:
+        move.append(("← День", f"view:{mode}:{offset-1}"))
+    if offset < MAX_DAY_OFFSET:
+        move.append(("День →", f"view:{mode}:{offset+1}"))
     return buttons(
-        [("← День", f"view:{mode}:{offset-1}"), ("День →", f"view:{mode}:{offset+1}")],
-        [("🏠 Меню", "view:home"), ("🗓 Неделя", "view:week")],
+        [(f"{'• ' if mode == key else ''}{label}", f"view:{key}:{offset}") for key, label in modes],
+        move,
+        [("🏠 Меню", "view:home"), ("🗓 Неделя", f"view:week:{week_offset}")],
     )
+
+
+def week_keyboard(week_offset):
+    today = datetime.now(TZ).date()
+    monday = today - timedelta(days=today.weekday()) + timedelta(weeks=week_offset)
+    dates = [monday + timedelta(days=index) for index in range(7)]
+    change_week = []
+    if week_offset > -MAX_WEEK_OFFSET:
+        change_week.append(("← Неделя", f"view:week:{week_offset-1}"))
+    if week_offset < MAX_WEEK_OFFSET:
+        change_week.append(("Неделя →", f"view:week:{week_offset+1}"))
+    rows = [change_week]
+    labels = ("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")
+    for index in range(0, 7, 2):
+        rows.append([(f"{labels[position]} {dates[position]:%d.%m}",
+                      f"view:day:{(dates[position]-today).days}")
+                     for position in range(index, min(index + 2, 7))])
+    rows.append([("🏠 Меню", "view:home")])
+    return buttons(*rows)
 
 
 def settings_keyboard(prefs):
@@ -107,26 +137,32 @@ def current_period(client):
 def fetch(chat_id, kind, offset=0, year=None):
     user = store.user(chat_id)
     client = new_client(user)
-    today = datetime.now(TZ).date()
-    target = today + timedelta(days=offset)
-    if kind in ("day", "bells", "homework", "week", "advice"):
-        monday = target - timedelta(days=target.weekday())
-        schedule = client.get_schedule(monday.strftime("%d.%m.%Y"))
-        if kind == "week":
-            return week_view(schedule)
-        if kind == "advice":
-            marks = client.get_current_marks(current_period(client))
-            return advice_view(schedule, marks, today + timedelta(days=1))
-        return schedule_view(schedule, target, {"day": "lessons"}.get(kind, kind))
-    if kind == "marks":
-        period = current_period(client)
-        return marks_view(client.get_current_marks(period), period)
-    if kind == "grades":
-        y = year or client.current_edu_year
-        return grades_view(client.get_year_grades(y), y)
-    if kind == "attendance":
-        return attendance_view(client.get_current_marks(current_period(client)), client.get_year_grades())
-    raise ValueError("Unknown view")
+    try:
+        now = datetime.now(TZ)
+        today = now.date()
+        target = today + timedelta(days=1 if kind == "advice" else offset)
+        if kind in ("dashboard", "day", "bells", "homework", "week", "advice"):
+            monday = target - timedelta(days=target.weekday())
+            schedule = client.get_schedule(monday.strftime("%d.%m.%Y"))
+            if kind == "dashboard":
+                return dashboard_view(schedule, today, now)
+            if kind == "week":
+                return week_view(schedule, monday)
+            if kind == "advice":
+                marks = client.get_current_marks(current_period(client))
+                return advice_view(schedule, marks, target)
+            return schedule_view(schedule, target, {"day": "lessons"}.get(kind, kind))
+        if kind == "marks":
+            period = current_period(client)
+            return marks_view(client.get_current_marks(period), period)
+        if kind == "grades":
+            y = year or client.current_edu_year
+            return grades_view(client.get_year_grades(y), y)
+        if kind == "attendance":
+            return attendance_view(client.get_current_marks(current_period(client)), client.get_year_grades())
+        raise ValueError("Unknown view")
+    finally:
+        client.session.close()
 
 
 def private(message):
@@ -141,7 +177,11 @@ async def start(message: Message, state: FSMContext):
     await state.clear()
     user = store.user(message.chat.id)
     if user:
-        await message.answer(f"<b>НЭО · твой школьный день</b>\n{h(user['profile'].get('group'))} · {h(user['profile'].get('schoolName'))}\n\nЧто посмотрим?", reply_markup=home_keyboard(), protect_content=True)
+        try:
+            content = await asyncio.to_thread(fetch, message.chat.id, "dashboard")
+        except Exception:
+            content = "<b>НЭО · твой школьный день</b>\nРасписание пока не загрузилось. Разделы доступны ниже."
+        await message.answer(content, reply_markup=home_keyboard(), protect_content=True)
     else:
         await message.answer("<b>Привет, я НЭО.</b>\nСоберу расписание, задания и оценки в одном месте и вовремя напомню о важном.\n\nПодключи дневник в личном чате:", reply_markup=buttons([("🔐 Подключить дневник", "auth:start")]), protect_content=True)
 
@@ -258,7 +298,11 @@ async def view(call: CallbackQuery):
     parts = call.data.split(":")
     kind = parts[1]
     if kind == "home":
-        await present(call, "<b>НЭО · меню</b>\nЧто посмотрим?", home_keyboard())
+        try:
+            content = await asyncio.to_thread(fetch, call.message.chat.id, "dashboard")
+        except Exception:
+            content = "<b>НЭО · меню</b>\nРасписание пока не загрузилось. Выбери нужный раздел."
+        await present(call, content, home_keyboard())
         return
     if kind == "settings":
         p = user["prefs"]
@@ -274,7 +318,11 @@ async def view(call: CallbackQuery):
     if kind not in ("day", "bells", "homework", "week", "advice", "marks", "grades", "attendance"):
         return
     try:
-        offset = max(-14, min(14, int(parts[2]))) if len(parts) > 2 else 0
+        raw_offset = int(parts[2]) if len(parts) > 2 else 0
+        week_offset = max(-MAX_WEEK_OFFSET, min(MAX_WEEK_OFFSET, raw_offset)) if kind == "week" else 0
+        offset = week_offset * 7 if kind == "week" else max(-MAX_DAY_OFFSET, min(MAX_DAY_OFFSET, raw_offset))
+        if kind == "grades":
+            offset = 0
         year = int(parts[2]) if kind == "grades" and len(parts) > 2 else None
         if year is not None:
             current = int(user["profile"].get("currentEduYear") or datetime.now(TZ).year)
@@ -289,6 +337,8 @@ async def view(call: CallbackQuery):
         return
     if kind in ("day", "bells", "homework"):
         markup = date_keyboard(kind, offset)
+    elif kind == "week":
+        markup = week_keyboard(week_offset)
     elif kind == "grades":
         current = int(user["profile"].get("currentEduYear") or datetime.now(TZ).year)
         years = user["profile"].get("availableEduYears") or list(range(current, current - 5, -1))
@@ -302,6 +352,13 @@ async def view(call: CallbackQuery):
 def collect_updates(chat_id):
     user = store.user(chat_id)
     client = new_client(user)
+    try:
+        return _collect_updates(chat_id, user, client)
+    finally:
+        client.session.close()
+
+
+def _collect_updates(chat_id, user, client):
     period = current_period(client)
     marks = client.get_current_marks(period)
     now = datetime.now(TZ)
@@ -322,7 +379,7 @@ def collect_updates(chat_id):
     store.set_snapshot(chat_id, "today_lessons", {"date": today.isoformat(), "lessons": today_lessons})
     for kind, current in payloads.items():
         saved = store.snapshot(chat_id, kind)
-        old = saved.get("data") if kind in ("homework", "schedule") and saved and saved.get("date") == tomorrow.isoformat() else (None if kind in ("homework", "schedule") else saved)
+        old = saved.get("data") if kind in ("homework", "schedule") and saved and saved.get("schema") == 2 and saved.get("date") == tomorrow.isoformat() else (None if kind in ("homework", "schedule") else saved)
         if old is not None and user["prefs"].get(kind):
             keys = set(current) | (set(old) if kind in ("homework", "schedule") else set())
             changed = sorted(key for key in keys if old.get(key) != current.get(key))
@@ -343,7 +400,7 @@ def collect_updates(chat_id):
                     text = f"Изменений: {len(changed)}. Открой раздел и проверь детали."
                 digest = hashlib.sha256(json.dumps({key: current.get(key) for key in changed}, ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:20]
                 store.enqueue(chat_id, f"{kind}:{digest}", f"<b>{title}</b>\n{text}")
-        store.set_snapshot(chat_id, kind, {"date": tomorrow.isoformat(), "data": current} if kind in ("homework", "schedule") else current)
+        store.set_snapshot(chat_id, kind, {"schema": 2, "date": tomorrow.isoformat(), "data": current} if kind in ("homework", "schedule") else current)
     if user["prefs"]["morning"]:
         last = store.snapshot(chat_id, "morning")
         if now.hour >= 7 and last != today.isoformat():
@@ -353,7 +410,7 @@ def collect_updates(chat_id):
     if user["prefs"]["weekly"] and today.weekday() == 0 and now.hour >= 7:
         last = store.snapshot(chat_id, "weekly")
         if last != today.isoformat():
-            store.enqueue(chat_id, f"weekly:{today}", week_view(today_schedule))
+            store.enqueue(chat_id, f"weekly:{today}", "<b>План недели</b>\n" + week_view(today_schedule, today_monday))
             store.set_snapshot(chat_id, "weekly", today.isoformat())
 
 
