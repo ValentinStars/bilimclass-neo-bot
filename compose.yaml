@@ -1,0 +1,10 @@
+services:
+  neo:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - neo_data:/app/data
+
+volumes:
+  neo_data:

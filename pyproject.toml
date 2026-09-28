@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bilimclass-neo-bot"
+version = "0.1.0"
+description = "Private Telegram companion for BilimClass students"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "aiogram>=3.30,<4",
+  "cryptography>=42,<51",
+  "python-dotenv>=1,<2",
+  "requests>=2.28,<3",
+]
+
+[project.scripts]
+bilim-neo = "bilim_neo.bot:run"
+
+[tool.setuptools.packages.find]
+include = ["bilim_neo*"]
