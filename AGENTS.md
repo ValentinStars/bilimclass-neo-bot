@@ -14,6 +14,7 @@ Read this first, then `docs/NEO.md` for the autonomous roadmap and `docs/ARCHITE
 - `bilim_neo/automation.py`: pure scheduling logic. Use aware `Asia/Almaty` datetimes.
 - `bilim_neo/bot_store.py`: encrypted SQLite state and outbox. Evolve schema with migrations before changing stored shapes on a deployed bot.
 - Run: `pip install -e .`, `python -m bilim_neo`; verify: `python -m unittest discover -s tests -v` and `python -m compileall -q bilim_neo`.
+- Runtime: `manage.sh` and `configure.sh` provide interactive setup without echoing the token. `start.sh`, `stop.sh`, `restart.sh`, `status.sh`, `logs.sh` manage a local daemon or an installed user systemd service. `scripts/deploy.sh` copies code without secrets. `scripts/apply_brand.py` uploads the committed JPG avatar.
 
 ## Hard rules
 
