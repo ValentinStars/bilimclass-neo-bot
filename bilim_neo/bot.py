@@ -37,6 +37,19 @@ MAX_WEEK_OFFSET = 8
 router = Router()
 store: BotStore
 logger = logging.getLogger(__name__)
+NOTIFICATION_FOOTER = "<i>⚙️ Уведомления можно изменить в настройках.</i>"
+
+
+def notification_text(content):
+    """Use a quiet visual footnote; Telegram has no per-line font-size control."""
+    if content.endswith(NOTIFICATION_FOOTER):
+        return content
+    if len(content) > 3900:
+        plain = visuals.plain(content)
+        while len(h(plain)) > 3800:
+            plain = plain[:len(plain) // 2].rstrip()
+        content = h(plain) + "\n…"
+    return content + "\n\n" + NOTIFICATION_FOOTER
 
 
 class Login(StatesGroup):
@@ -678,7 +691,7 @@ async def view(call: CallbackQuery):
     if kind == "settings":
         store.record_activity(call.from_user.id, "settings")
         p = user["prefs"]
-        await present(call, f"<b>⚙️ Настройки</b>\nВыбери уведомления и нужные разделы.\n🌙 Тихие часы: {p['quiet_from']:02d}:00–{p['quiet_to']:02d}:00", settings_keyboard(p, call.from_user.id, user["profile"], store.get_setting("lord_bonus_enabled", True)))
+        await present(call, f"<b>⚙️ Настройки</b>\nПо умолчанию включены только новые оценки. Остальные уведомления можно включить здесь.\n🌙 Тихие часы: {p['quiet_from']:02d}:00–{p['quiet_to']:02d}:00", settings_keyboard(p, call.from_user.id, user["profile"], store.get_setting("lord_bonus_enabled", True)))
         return
     if kind == "bonus":
         if not is_lord_school(user["profile"].get("schoolName")) or not store.get_setting("lord_bonus_enabled", True) or not user["prefs"]["lord_bonus"]:
@@ -830,7 +843,7 @@ async def notifications(bot: Bot, interval: int):
                         key = f"bell:{now.date()}:{number}"
                         store.enqueue(chat_id, key, f"<b>Скоро урок · {number:02d}</b>\n{h(lesson.get('label') or 'Урок')} в {start:%H:%M} · каб. {h(lesson.get('cabinet'))}")
                 for item_id, notice in store.pending(chat_id):
-                    await bot.send_message(chat_id, notice, protect_content=True, reply_markup=home_keyboard(user["prefs"]))
+                    await bot.send_message(chat_id, notification_text(notice), protect_content=True, reply_markup=home_keyboard(user["prefs"]))
                     store.mark_sent(item_id)
             except Exception:
                 logger.exception("Notification delivery failed for chat %s", chat_id)

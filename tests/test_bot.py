@@ -247,6 +247,41 @@ class AttachmentTest(unittest.TestCase):
 
 
 class StoreTest(unittest.TestCase):
+    def test_notification_defaults_migrate_existing_users_only_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "neo.sqlite3")
+            key = Fernet.generate_key().decode()
+            store = BotStore(path, key)
+            store.save_user(7, "student", "password", {})
+            store.set_pref(7, "marks", False)
+            store.set_pref(7, "planner", False)
+            for kind in ("homework", "schedule", "attendance", "morning", "bell_reminders", "weekly"):
+                store.set_pref(7, kind, True)
+            for event_key in ("homework:1", "schedule:1", "attendance:1", "morning:1", "bell:1", "weekly:1", "referral:1"):
+                store.enqueue(7, event_key, event_key)
+            with store._db() as db:
+                db.execute("DELETE FROM app_settings WHERE key='notification_defaults_v2'")
+
+            migrated = BotStore(path, key)
+            prefs = migrated.user(7)["prefs"]
+            self.assertTrue(prefs["marks"])
+            self.assertFalse(prefs["planner"])
+            self.assertTrue(all(not prefs[k] for k in ("homework", "schedule", "attendance", "morning", "bell_reminders", "weekly")))
+            self.assertEqual([text for _, text in migrated.pending(7)], ["referral:1"])
+            migrated.set_pref(7, "schedule", True)
+            self.assertTrue(BotStore(path, key).user(7)["prefs"]["schedule"])
+
+    def test_only_marks_are_enabled_for_new_users_and_notice_has_footer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = BotStore(str(Path(tmp) / "neo.sqlite3"), Fernet.generate_key().decode())
+            store.save_user(8, "student", "password", {})
+            prefs = store.user(8)["prefs"]
+            self.assertTrue(prefs["marks"])
+            self.assertTrue(all(not prefs[k] for k in ("homework", "schedule", "attendance", "morning", "bell_reminders", "weekly")))
+        text = bot.notification_text("<b>Новая оценка</b>")
+        self.assertIn("<i>⚙️ Уведомления можно изменить в настройках.</i>", text)
+        self.assertEqual(bot.notification_text(text), text)
+
     def test_existing_user_gets_planner_preference_and_can_disable_it(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = BotStore(str(Path(tmp) / "neo.sqlite3"), Fernet.generate_key().decode())

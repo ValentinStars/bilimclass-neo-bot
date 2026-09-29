@@ -12,9 +12,9 @@ from cryptography.fernet import Fernet
 
 DEFAULT_PREFS = {
     "marks": True,
-    "homework": True,
-    "schedule": True,
-    "attendance": True,
+    "homework": False,
+    "schedule": False,
+    "attendance": False,
     "morning": False,
     "bell_reminders": False,
     "weekly": False,
@@ -93,6 +93,19 @@ class BotStore:
                     content BLOB NOT NULL, created_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open'
                 );
             """)
+            # Run once on deployed databases. Afterwards users may opt in again.
+            marker = db.execute("SELECT 1 FROM app_settings WHERE key='notification_defaults_v2'").fetchone()
+            if marker is None:
+                disabled = ("homework", "schedule", "attendance", "morning", "bell_reminders", "weekly")
+                for chat_id, sealed in db.execute("SELECT chat_id,prefs FROM users"):
+                    prefs = self._open(sealed)
+                    prefs.update({key: False for key in disabled})
+                    prefs["marks"] = True
+                    db.execute("UPDATE users SET prefs=? WHERE chat_id=?", (self._seal(prefs), chat_id))
+                db.execute("DELETE FROM outbox WHERE event_key LIKE 'homework:%' OR event_key LIKE 'schedule:%' "
+                           "OR event_key LIKE 'attendance:%' OR event_key LIKE 'morning:%' "
+                           "OR event_key LIKE 'bell:%' OR event_key LIKE 'weekly:%'")
+                db.execute("INSERT INTO app_settings(key,value) VALUES ('notification_defaults_v2','true')")
         os.chmod(self.path, 0o600)
 
     @contextmanager

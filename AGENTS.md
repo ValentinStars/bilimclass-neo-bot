@@ -4,7 +4,7 @@ Read this first, then `docs/NEO.md` for the autonomous roadmap and `docs/ARCHITE
 
 ## Product contract
 
-НЭО serves an individual BilimClass student in a private Telegram chat. The primary action is checking today's school day. Proactive messages are opt-in per category, except change alerts that are enabled by default and can be disabled individually. Messages should be concise, friendly, and useful: title, concrete fact, next action. Avoid generic praise, excessive emoji, and walls of text. Use inline keyboards for navigation, native commands for shortcuts. Every state needs a clear way back.
+НЭО serves an individual BilimClass student in a private Telegram chat. The primary action is checking today's school day. Only new grade alerts are enabled by default; homework, schedule, attendance and reminder categories require opt-in. Messages should be concise, friendly, and useful: title, concrete fact, next action. Avoid generic praise, excessive emoji, and walls of text. Use inline keyboards for navigation, native commands for shortcuts. Every state needs a clear way back.
 
 ## Files and commands
 
@@ -39,6 +39,7 @@ Read this first, then `docs/NEO.md` for the autonomous roadmap and `docs/ARCHITE
 12. The admin export of `login,password,class` is deliberately sensitive. Keep it restricted to configured IDs or valid recovery sessions, require in-panel confirmation, construct it only in memory, and send only to the owner's private chat. Never exercise this export in live testing. Test with fake credentials.
 13. Recovery access is authorized by the owner as a second admin entry. Keep PBKDF2 at 600,000 iterations, per-chat and global rate limits, a 12-hour expiry and hash-bound session revocation. Do not grant access just because a stored profile says `local_admin`. That flag only suppresses BilimClass requests. `/logout` must remove the session.
 14. Appearance choices and current Telegram username live encrypted in `visitors` before registration. Existing users default to compact. Feedback content is encrypted with a 90-day retention and deleted on `/logout`; media is copied on demand from Telegram, never downloaded. Only a verified admin may reply, and the recipient comes from the saved ticket.
+15. `notification_defaults_v2` is a one-time migration: enable marks, disable homework/schedule/attendance/morning/bell/weekly, and remove queued alerts of disabled categories. Keep it one-time so later opt-ins survive restarts. Every outbox notification gets a short italic settings footnote; Telegram offers no smaller font size for bot messages.
 
 ## Definition of done for a feature
 
