@@ -18,6 +18,7 @@ DEFAULT_PREFS = {
     "bell_reminders": False,
     "weekly": False,
     "planner": True,
+    "button_colors": True,
     "quiet_from": 22,
     "quiet_to": 7,
 }

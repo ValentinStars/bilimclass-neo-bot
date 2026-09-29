@@ -90,6 +90,23 @@ class ViewsTest(unittest.TestCase):
         self.assertNotIn("task:open:0", [button.callback_data for row in hidden_day.inline_keyboard for button in row])
         self.assertIn("files:list:0", [button.callback_data for row in hidden_day.inline_keyboard for button in row])
 
+    def test_color_preference_applies_across_navigation(self):
+        on = {"planner": True, "button_colors": True}
+        off = {"planner": True, "button_colors": False}
+        prefs = {"marks": True, "homework": False, "schedule": True, "attendance": False,
+                 "morning": False, "bell_reminders": False, "weekly": False,
+                 "planner": True, "button_colors": True}
+        self.assertEqual(bot.home_keyboard(on).inline_keyboard[1][0].style, "primary")
+        self.assertEqual(bot.week_keyboard(0, on).inline_keyboard[1][0].style, "primary")
+        self.assertEqual(bot.date_keyboard("homework", 0, on).inline_keyboard[1][-1].style, "primary")
+        self.assertEqual(bot.settings_keyboard(prefs).inline_keyboard[0][0].style, "success")
+        self.assertIsNone(bot.settings_keyboard(prefs).inline_keyboard[1][0].style)
+        for markup in (bot.home_keyboard(off), bot.week_keyboard(0, off),
+                       bot.date_keyboard("homework", 0, off),
+                       bot.settings_keyboard({**prefs, "button_colors": False}),
+                       bot.quiet_keyboard(off)):
+            self.assertTrue(all(button.style is None for row in markup.inline_keyboard for button in row))
+
     def test_next_lesson_uses_telegram_relative_time(self):
         now = datetime(2026, 9, 28, 8, 10, tzinfo=ZoneInfo("Asia/Almaty"))
         screen = dashboard_view(LOCALIZED_SCHEDULE, now.date(), now)
@@ -234,8 +251,11 @@ class StoreTest(unittest.TestCase):
             store = BotStore(str(Path(tmp) / "neo.sqlite3"), Fernet.generate_key().decode())
             store.save_user(7, "student", "password", {})
             self.assertTrue(store.user(7)["prefs"]["planner"])
+            self.assertTrue(store.user(7)["prefs"]["button_colors"])
             store.set_pref(7, "planner", False)
+            store.set_pref(7, "button_colors", False)
             self.assertFalse(store.user(7)["prefs"]["planner"])
+            self.assertFalse(store.user(7)["prefs"]["button_colors"])
 
     def test_homework_checklist_is_encrypted_and_toggles(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -29,6 +29,7 @@ Read this first, then `docs/NEO.md` for the autonomous roadmap and `docs/ARCHITE
 7. Homework attachments come from `GET /api/v4/os/clientoffice/homeworks/simple-homework/info` with `homeworkUuid`, `schoolId`, `eduYear`. Live responses contain `files[]` entries with `name`, `extension`, `sizeInBytes`, and short-lived `link` on `storage.yandexcloud.kz`. The bot resolves list/send callback indexes against fresh diary data and streams after a deliberate tap. Keep the 49 MB cap and private-chat check.
 8. Keep homework completion separate from BilimClass data: the checklist is a local planning aid, not a submission to the school. Do not label a task submitted or completed in BilimClass when it is merely checked locally.
 9. `prefs.planner` is a view preference, separate from `prefs.homework` notifications. When off, hide planner entry points and dashboard progress, reject old `task:` callbacks, and keep encrypted completion state so re-enabling restores it. The UI uses Bot API button `style`, `tg-time`, and expandable blockquotes; keep plain text fallbacks and tests.
+10. `prefs.button_colors` defaults on and controls *every* keyboard for that student. Route new inline buttons through `buttons(..., prefs=user["prefs"])` or a keyboard helper that accepts prefs; keep a single semantic style mapping in `action_style()` and verify color-off removes all styles, including explicit ones. Existing sent messages retain their old markup until navigated or edited.
 
 ## Definition of done for a feature
 

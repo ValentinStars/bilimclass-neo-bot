@@ -41,9 +41,28 @@ class Login(StatesGroup):
     password = State()
 
 
-def buttons(*rows):
+def action_style(label, action):
+    """Keep navigation calm; color destinations and positive actions consistently."""
+    if label.startswith(("←", "🏠")):
+        return None
+    if action.startswith("toggle:"):
+        return "success" if label.startswith("✅") else None
+    if action.startswith(("task:open:", "task:toggle:", "auth:start")):
+        return "success"
+    if action.startswith(("view:day:", "view:week:", "view:bells:",
+                          "view:homework:", "view:marks", "view:grades",
+                          "view:attendance", "view:advice", "view:settings",
+                          "view:quiet", "view:profile", "marks:subject",
+                          "files:list:", "files:send:", "quiet:")):
+        return "primary"
+    return None
+
+
+def buttons(*rows, prefs=None):
+    colored = (prefs or {}).get("button_colors", True)
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=item[0], callback_data=item[1], style=item[2] if len(item) > 2 else None)
+        [InlineKeyboardButton(text=item[0], callback_data=item[1],
+                              style=(item[2] if len(item) > 2 else action_style(item[0], item[1])) if colored else None)
          for item in row]
         for row in rows
     ])
@@ -62,11 +81,11 @@ def home_keyboard(prefs=None):
         rows.append([("⚙️ Настройки", "view:settings")])
     else:
         rows.append([("💡 Советы", "view:advice"), ("⚙️ Настройки", "view:settings")])
-    return buttons(*rows)
+    return buttons(*rows, prefs=prefs)
 
 
-def back_keyboard():
-    return buttons([("← Главное меню", "view:home")])
+def back_keyboard(prefs=None):
+    return buttons([("← Главное меню", "view:home")], prefs=prefs)
 
 
 async def present(call: CallbackQuery, content: str, markup):
@@ -99,10 +118,10 @@ def date_keyboard(mode, offset, prefs=None):
         actions.append(("📎 Файлы", f"files:list:{offset}"))
         rows.append(actions)
     rows.extend((move, [("🏠 Меню", "view:home"), ("🗓 Неделя", f"view:week:{week_offset}")]))
-    return buttons(*rows)
+    return buttons(*rows, prefs=prefs)
 
 
-def week_keyboard(week_offset):
+def week_keyboard(week_offset, prefs=None):
     today = datetime.now(TZ).date()
     monday = today - timedelta(days=today.weekday()) + timedelta(weeks=week_offset)
     dates = [monday + timedelta(days=index) for index in range(7)]
@@ -118,7 +137,7 @@ def week_keyboard(week_offset):
                       f"view:day:{(dates[position]-today).days}")
                      for position in range(index, min(index + 2, 7))])
     rows.append([("🏠 Меню", "view:home")])
-    return buttons(*rows)
+    return buttons(*rows, prefs=prefs)
 
 
 def settings_keyboard(prefs):
@@ -128,9 +147,10 @@ def settings_keyboard(prefs):
              ("weekly", "План недели")]
     rows = [[(f"{'✅' if prefs[key] else '⬜'} {name}", f"toggle:{key}")] for key, name in names]
     rows += [[(f"{'✅' if prefs['planner'] else '⬜'} План ДЗ", "toggle:planner")],
+             [(f"{'✅' if prefs['button_colors'] else '⬜'} Цветные кнопки", "toggle:button_colors")],
              [("🌙 Тихие часы", "view:quiet")],
              [("🔐 Профиль", "view:profile"), ("🏠 Меню", "view:home")]]
-    return buttons(*rows)
+    return buttons(*rows, prefs=prefs)
 
 
 def new_client(user):
@@ -197,14 +217,14 @@ def homework_plan(chat_id, offset):
         client.session.close()
 
 
-def plan_keyboard(tasks, done, offset, target):
+def plan_keyboard(tasks, done, offset, target, prefs=None):
     rows = [[(f"{'✅' if task['key'] in done else '○'} {task['lesson'].get('label') or 'Урок'}"[:60],
               f"task:toggle:{offset}:{task['index']}:{target:%Y%m%d}:{task['key']}",
               None if task["key"] in done else "success")] for task in tasks[:30]]
     navigation = ([("← День", f"task:open:{offset-1}")] if offset > -MAX_DAY_OFFSET else []) + \
                  ([("День →", f"task:open:{offset+1}")] if offset < MAX_DAY_OFFSET else [])
     rows.extend((navigation, [("📝 Откры ДЗ", f"view:homework:{offset}"), ("🏠 Меню", "view:home")]))
-    return buttons(*rows)
+    return buttons(*rows, prefs=prefs)
 
 
 @router.callback_query(F.data.startswith("task:"))
@@ -216,7 +236,7 @@ async def task(call: CallbackQuery):
     if not user:
         return
     if not user["prefs"]["planner"]:
-        await call.message.answer("План ДЗ выключен. Его можно включить в настройках.", reply_markup=buttons([("⚙️ Настройки", "view:settings")]), protect_content=True)
+        await call.message.answer("План ДЗ выключен. Его можно включить в настройках.", reply_markup=buttons([("⚙️ Настройки", "view:settings")], prefs=user["prefs"]), protect_content=True)
         return
     try:
         parts = call.data.split(":")
@@ -233,10 +253,10 @@ async def task(call: CallbackQuery):
             done = store.toggle_homework_done(call.message.chat.id, target.isoformat(), selected["key"])
         else:
             done = store.homework_done(call.message.chat.id, target.isoformat())
-        await present(call, checklist_view(tasks, done, target), plan_keyboard(tasks, done, offset, target))
+        await present(call, checklist_view(tasks, done, target), plan_keyboard(tasks, done, offset, target, user["prefs"]))
     except Exception:
         logger.exception("Homework plan failed for chat %s", call.message.chat.id)
-        await call.message.answer("План ДЗ пока недоступен. Попробуй позже.", reply_markup=back_keyboard(), protect_content=True)
+        await call.message.answer("План ДЗ пока недоступен. Попробуй позже.", reply_markup=back_keyboard(user["prefs"]), protect_content=True)
 
 
 def subject_marks(chat_id, subject_index=None, expected_key=None):
@@ -260,7 +280,10 @@ def subject_marks(chat_id, subject_index=None, expected_key=None):
 @router.callback_query(F.data.startswith("marks:"))
 async def marks_detail(call: CallbackQuery):
     await call.answer()
-    if call.message.chat.type != "private" or not store.user(call.message.chat.id):
+    if call.message.chat.type != "private":
+        return
+    user = store.user(call.message.chat.id)
+    if not user:
         return
     try:
         parts = call.data.split(":")
@@ -270,17 +293,17 @@ async def marks_detail(call: CallbackQuery):
                     for index, name in enumerate(names[:40])]
             rows.append([("← Все оценки", "view:marks")])
             content = "<b>📚 Оценки по предметам</b>\nВыбери предмет." if names else "<b>📚 Оценки по предметам</b>\nПока оценок нет."
-            await present(call, content, buttons(*rows))
+            await present(call, content, buttons(*rows, prefs=user["prefs"]))
         elif parts[1] == "subject":
             index = int(parts[2])
             content = await asyncio.to_thread(subject_marks, call.message.chat.id, index, parts[3] if len(parts) == 4 else None)
             if content is None:
-                await call.message.answer("Список предметов изменился. Открой его заново.", reply_markup=buttons([("← Предметы", "marks:subjects")]), protect_content=True)
+                await call.message.answer("Список предметов изменился. Открой его заново.", reply_markup=buttons([("← Предметы", "marks:subjects")], prefs=user["prefs"]), protect_content=True)
                 return
-            await present(call, content, buttons([("← Предметы", "marks:subjects"), ("🏠 Меню", "view:home")]))
+            await present(call, content, buttons([("← Предметы", "marks:subjects"), ("🏠 Меню", "view:home")], prefs=user["prefs"]))
     except Exception:
         logger.exception("Subject marks failed for chat %s", call.message.chat.id)
-        await call.message.answer("Оценки пока недоступны. Попробуй позже.", reply_markup=back_keyboard(), protect_content=True)
+        await call.message.answer("Оценки пока недоступны. Попробуй позже.", reply_markup=back_keyboard(user["prefs"]), protect_content=True)
 
 
 def homework_attachments(chat_id, offset, lesson_index=None, file_index=None):
@@ -315,7 +338,8 @@ async def files(call: CallbackQuery):
     if call.message.chat.type != "private":
         await call.answer()
         return
-    if not store.user(call.message.chat.id):
+    user = store.user(call.message.chat.id)
+    if not user:
         await call.answer("Сначала подключи дневник", show_alert=True)
         return
     offset = 0
@@ -329,7 +353,7 @@ async def files(call: CallbackQuery):
             await call.answer("Ищу файлы…")
             entries = await asyncio.to_thread(homework_attachments, call.message.chat.id, offset)
             if not entries:
-                await present(call, "<b>📎 Файлы к ДЗ</b>\nНа этот день вложений нет.", buttons([("← К ДЗ", f"view:homework:{offset}")]))
+                await present(call, "<b>📎 Файлы к ДЗ</b>\nНа этот день вложений нет.", buttons([("← К ДЗ", f"view:homework:{offset}")], prefs=user["prefs"]))
                 return
             rows = []
             for lesson_index, file_index, subject, metadata in entries[:40]:
@@ -340,7 +364,7 @@ async def files(call: CallbackQuery):
                 rows.append([(label[:60], f"files:send:{offset}:{lesson_index}:{file_index}")])
             rows.append([("← К ДЗ", f"view:homework:{offset}")])
             extra = "\nПоказаны первые 40 файлов." if len(entries) > 40 else ""
-            await present(call, f"<b>📎 Файлы к ДЗ</b>\nНажми на файл — отправлю его сюда. На сервере файлы не сохраняются.{extra}", buttons(*rows))
+            await present(call, f"<b>📎 Файлы к ДЗ</b>\nНажми на файл — отправлю его сюда. На сервере файлы не сохраняются.{extra}", buttons(*rows, prefs=user["prefs"]))
             return
         if action == "send" and len(parts) == 5:
             lesson_index, file_index = int(parts[3]), int(parts[4])
@@ -353,11 +377,11 @@ async def files(call: CallbackQuery):
             return
         raise ValueError
     except AttachmentError as exc:
-        await call.message.answer(h(str(exc)), reply_markup=buttons([("← К ДЗ", f"view:homework:{offset}")]), protect_content=True)
+        await call.message.answer(h(str(exc)), reply_markup=buttons([("← К ДЗ", f"view:homework:{offset}")], prefs=user["prefs"]), protect_content=True)
     except Exception as exc:
         # aiohttp errors may include a signed storage URL; never log its traceback.
         logger.warning("Attachment delivery failed for chat %s (%s)", call.message.chat.id, type(exc).__name__)
-        await call.message.answer("Не удалось отправить файл. Открой список заново или попробуй позже.", reply_markup=buttons([("← К ДЗ", f"view:homework:{offset}")]), protect_content=True)
+        await call.message.answer("Не удалось отправить файл. Открой список заново или попробуй позже.", reply_markup=buttons([("← К ДЗ", f"view:homework:{offset}")], prefs=user["prefs"]), protect_content=True)
 
 
 def private(message):
@@ -384,7 +408,8 @@ async def start(message: Message, state: FSMContext):
 @router.message(Command("cancel"))
 async def cancel(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer("Ввод отменён.", reply_markup=back_keyboard())
+    user = store.user(message.chat.id) if private(message) else None
+    await message.answer("Ввод отменён.", reply_markup=back_keyboard(user["prefs"] if user else None))
 
 
 @router.message(Command("logout"))
@@ -450,7 +475,7 @@ async def toggle(call: CallbackQuery):
         await call.answer("Сначала подключи дневник", show_alert=True)
         return
     key = call.data.split(":", 1)[1]
-    if key not in ("marks", "homework", "schedule", "attendance", "morning", "bell_reminders", "weekly", "planner"):
+    if key not in ("marks", "homework", "schedule", "attendance", "morning", "bell_reminders", "weekly", "planner", "button_colors"):
         await call.answer()
         return
     store.set_pref(call.message.chat.id, key, not user["prefs"][key])
@@ -474,11 +499,11 @@ async def quiet(call: CallbackQuery):
     store.set_pref(call.message.chat.id, "quiet_from", start)
     store.set_pref(call.message.chat.id, "quiet_to", end)
     await call.answer("Тихие часы сохранены")
-    await call.message.edit_text(f"<b>Тихие часы</b> · {start:02d}:00–{end:02d}:00\nУведомления придут после окончания паузы.", reply_markup=quiet_keyboard())
+    await call.message.edit_text(f"<b>Тихие часы</b> · {start:02d}:00–{end:02d}:00\nУведомления придут после окончания паузы.", reply_markup=quiet_keyboard(user["prefs"]))
 
 
-def quiet_keyboard():
-    return buttons([("22:00–07:00", "quiet:22:7"), ("21:00–08:00", "quiet:21:8")], [("00:00–00:00 · выкл.", "quiet:0:0")], [("← Настройки", "view:settings")])
+def quiet_keyboard(prefs=None):
+    return buttons([("22:00–07:00", "quiet:22:7"), ("21:00–08:00", "quiet:21:8")], [("00:00–00:00 · выкл.", "quiet:0:0")], [("← Настройки", "view:settings")], prefs=prefs)
 
 
 @router.callback_query(F.data.startswith("view:"))
@@ -504,11 +529,11 @@ async def view(call: CallbackQuery):
         await present(call, f"<b>⚙️ Настройки</b>\nВыбери уведомления и нужные разделы.\n🌙 Тихие часы: {p['quiet_from']:02d}:00–{p['quiet_to']:02d}:00", settings_keyboard(p))
         return
     if kind == "quiet":
-        await present(call, "<b>Тихие часы</b>\nВыбери удобный режим по времени Алматы.", quiet_keyboard())
+        await present(call, "<b>Тихие часы</b>\nВыбери удобный режим по времени Алматы.", quiet_keyboard(user["prefs"]))
         return
     if kind == "profile":
         p = user["profile"]
-        await present(call, f"<b>Профиль</b>\n{h(p.get('fio'))}\n{h(p.get('group'))} · {h(p.get('schoolName'))}\nУчебный год: {h(p.get('currentEduYear'))}\n\nОтключить дневник и удалить данные: /logout", back_keyboard())
+        await present(call, f"<b>Профиль</b>\n{h(p.get('fio'))}\n{h(p.get('group'))} · {h(p.get('schoolName'))}\nУчебный год: {h(p.get('currentEduYear'))}\n\nОтключить дневник и удалить данные: /logout", back_keyboard(user["prefs"]))
         return
     if kind not in ("day", "bells", "homework", "week", "advice", "marks", "grades", "attendance"):
         return
@@ -523,26 +548,26 @@ async def view(call: CallbackQuery):
             current = int(user["profile"].get("currentEduYear") or datetime.now(TZ).year)
             available = user["profile"].get("availableEduYears") or list(range(current, current - 5, -1))
             if year not in available:
-                await call.message.answer("Этот учебный год недоступен в профиле.", reply_markup=back_keyboard())
+                await call.message.answer("Этот учебный год недоступен в профиле.", reply_markup=back_keyboard(user["prefs"]))
                 return
         content = await asyncio.to_thread(fetch, call.message.chat.id, kind, offset, year)
     except Exception:
         logger.exception("BilimClass view failed for chat %s", call.message.chat.id)
-        await call.message.answer("Дневник временно недоступен. Попробуй чуть позже. Если пароль изменился — /logout и подключи дневник снова.", reply_markup=back_keyboard())
+        await call.message.answer("Дневник временно недоступен. Попробуй чуть позже. Если пароль изменился — /logout и подключи дневник снова.", reply_markup=back_keyboard(user["prefs"]))
         return
     if kind in ("day", "bells", "homework"):
         markup = date_keyboard(kind, offset, user["prefs"])
     elif kind == "week":
-        markup = week_keyboard(week_offset)
+        markup = week_keyboard(week_offset, user["prefs"])
     elif kind == "grades":
         current = int(user["profile"].get("currentEduYear") or datetime.now(TZ).year)
         years = user["profile"].get("availableEduYears") or list(range(current, current - 5, -1))
         rows = [[(f"{y}/{y+1}", f"view:grades:{y}") for y in years[i:i+2]] for i in range(0, len(years), 2)]
-        markup = buttons(*rows, [("← Меню", "view:home")])
+        markup = buttons(*rows, [("← Меню", "view:home")], prefs=user["prefs"])
     elif kind == "marks":
-        markup = buttons([("📚 По предметам", "marks:subjects")], [("🏠 Меню", "view:home")])
+        markup = buttons([("📚 По предметам", "marks:subjects")], [("🏠 Меню", "view:home")], prefs=user["prefs"])
     else:
-        markup = back_keyboard()
+        markup = back_keyboard(user["prefs"])
     await present(call, content, markup)
 
 
