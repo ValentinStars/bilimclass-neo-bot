@@ -117,6 +117,29 @@ class BotStore:
                 ON CONFLICT(chat_id,kind) DO UPDATE SET content=excluded.content""",
                 (chat_id, kind, self._seal(content)))
 
+    def homework_done(self, chat_id: int, target: str):
+        saved = self.snapshot(chat_id, "homework_done") or {}
+        return set(saved.get(target, []))
+
+    def toggle_homework_done(self, chat_id: int, target: str, task_key: str):
+        """Toggle atomically; keep at most 30 dates of encrypted checklist state."""
+        with self._db() as db:
+            row = db.execute("SELECT content FROM snapshots WHERE chat_id=? AND kind='homework_done'", (chat_id,)).fetchone()
+            saved = self._open(row[0]) if row else {}
+            done = set(saved.get(target, []))
+            if task_key in done:
+                done.remove(task_key)
+            else:
+                done.add(task_key)
+            if done:
+                saved[target] = sorted(done)
+            else:
+                saved.pop(target, None)
+            saved = {key: saved[key] for key in sorted(saved)[-30:]}
+            db.execute("""INSERT INTO snapshots(chat_id,kind,content) VALUES (?, 'homework_done', ?)
+                ON CONFLICT(chat_id,kind) DO UPDATE SET content=excluded.content""", (chat_id, self._seal(saved)))
+        return done
+
     def enqueue(self, chat_id: int, event_key: str, content: str):
         with self._db() as db:
             db.execute("INSERT OR IGNORE INTO outbox(chat_id,event_key,content) VALUES (?,?,?)",

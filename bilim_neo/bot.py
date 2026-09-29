@@ -23,8 +23,9 @@ from .attachments import AttachmentError, StreamedAttachment, file_name, file_si
 from .automation import due_bells, quiet_now
 from .bot_views import (advice_view, attendance_view, dashboard_view, day,
                         grades_view, h, marks_view, parse_day, schedule_view,
-                        week_view)
+                        week_view, checklist_view, subject_marks_view)
 from .client import BilimClassClient
+from .planner import tasks_for_day, task_progress
 
 
 TZ = ZoneInfo("Asia/Almaty")
@@ -53,7 +54,8 @@ def home_keyboard():
         [("🗓 Неделя", "view:week:0"), ("🔔 Звонки", "view:bells:0")],
         [("📝 ДЗ сегодня", "view:homework:0"), ("📊 Оценки", "view:marks")],
         [("📈 Табель", "view:grades"), ("🏃 Посещаемость", "view:attendance")],
-        [("💡 Советы", "view:advice"), ("⚙️ Настройки", "view:settings")],
+        [("✅ План ДЗ", "task:open:0"), ("💡 Советы", "view:advice")],
+        [("⚙️ Настройки", "view:settings")],
     )
 
 
@@ -84,7 +86,7 @@ def date_keyboard(mode, offset):
         move.append(("День →", f"view:{mode}:{offset+1}"))
     rows = [[(f"{'• ' if mode == key else ''}{label}", f"view:{key}:{offset}") for key, label in modes]]
     if mode == "homework":
-        rows.append([("📎 Файлы к заданиям", f"files:list:{offset}")])
+        rows.append([("✅ План ДЗ", f"task:open:{offset}"), ("📎 Файлы", f"files:list:{offset}")])
     rows.extend((move, [("🏠 Меню", "view:home"), ("🗓 Неделя", f"view:week:{week_offset}")]))
     return buttons(*rows)
 
@@ -146,7 +148,9 @@ def fetch(chat_id, kind, offset=0, year=None):
             monday = target - timedelta(days=target.weekday())
             schedule = client.get_schedule(monday.strftime("%d.%m.%Y"))
             if kind == "dashboard":
-                return dashboard_view(schedule, today, now)
+                tasks = tasks_for_day(schedule, today)
+                done = store.homework_done(chat_id, today.isoformat())
+                return dashboard_view(schedule, today, now, task_progress(tasks, done))
             if kind == "week":
                 return week_view(schedule, monday)
             if kind == "advice":
@@ -164,6 +168,97 @@ def fetch(chat_id, kind, offset=0, year=None):
         raise ValueError("Unknown view")
     finally:
         client.session.close()
+
+
+def homework_plan(chat_id, offset):
+    user = store.user(chat_id)
+    client = new_client(user)
+    try:
+        target = datetime.now(TZ).date() + timedelta(days=offset)
+        monday = target - timedelta(days=target.weekday())
+        schedule = client.get_schedule(monday.strftime("%d.%m.%Y"))
+        return target, tasks_for_day(schedule, target)
+    finally:
+        client.session.close()
+
+
+def plan_keyboard(tasks, done, offset, target):
+    rows = [[(f"{'✅' if task['key'] in done else '○'} {task['lesson'].get('label') or 'Урок'}"[:60],
+              f"task:toggle:{offset}:{task['index']}:{target:%Y%m%d}:{task['key']}")] for task in tasks[:30]]
+    navigation = ([("← День", f"task:open:{offset-1}")] if offset > -MAX_DAY_OFFSET else []) + \
+                 ([("День →", f"task:open:{offset+1}")] if offset < MAX_DAY_OFFSET else [])
+    rows.extend((navigation, [("📝 Откры ДЗ", f"view:homework:{offset}"), ("🏠 Меню", "view:home")]))
+    return buttons(*rows)
+
+
+@router.callback_query(F.data.startswith("task:"))
+async def task(call: CallbackQuery):
+    await call.answer()
+    if call.message.chat.type != "private" or not store.user(call.message.chat.id):
+        return
+    try:
+        parts = call.data.split(":")
+        action, offset = parts[1], int(parts[2])
+        if not -MAX_DAY_OFFSET <= offset <= MAX_DAY_OFFSET or action not in ("open", "toggle"):
+            return
+        target, tasks = await asyncio.to_thread(homework_plan, call.message.chat.id, offset)
+        if action == "toggle":
+            index = int(parts[3])
+            selected = next((item for item in tasks if item["index"] == index), None)
+            if selected is None or len(parts) != 6 or parts[4] != target.strftime("%Y%m%d") or selected["key"] != parts[5]:
+                await call.message.answer("Задание изменилось. Открой план заново.", protect_content=True)
+                return
+            done = store.toggle_homework_done(call.message.chat.id, target.isoformat(), selected["key"])
+        else:
+            done = store.homework_done(call.message.chat.id, target.isoformat())
+        await present(call, checklist_view(tasks, done, target), plan_keyboard(tasks, done, offset, target))
+    except Exception:
+        logger.exception("Homework plan failed for chat %s", call.message.chat.id)
+        await call.message.answer("План ДЗ пока недоступен. Попробуй позже.", reply_markup=back_keyboard(), protect_content=True)
+
+
+def subject_marks(chat_id, subject_index=None, expected_key=None):
+    user = store.user(chat_id)
+    client = new_client(user)
+    try:
+        period = current_period(client)
+        marks = client.get_current_marks(period)
+        names = sorted({row["subject"] for row in marks if row.get("subject")})
+        if subject_index is None:
+            return names
+        if not 0 <= subject_index < len(names):
+            return None
+        if expected_key != hashlib.sha256(names[subject_index].encode()).hexdigest()[:12]:
+            return None
+        return subject_marks_view(marks, names[subject_index], period)
+    finally:
+        client.session.close()
+
+
+@router.callback_query(F.data.startswith("marks:"))
+async def marks_detail(call: CallbackQuery):
+    await call.answer()
+    if call.message.chat.type != "private" or not store.user(call.message.chat.id):
+        return
+    try:
+        parts = call.data.split(":")
+        if parts[1] == "subjects":
+            names = await asyncio.to_thread(subject_marks, call.message.chat.id)
+            rows = [[(name[:60], f"marks:subject:{index}:{hashlib.sha256(name.encode()).hexdigest()[:12]}")]
+                    for index, name in enumerate(names[:40])]
+            rows.append([("← Все оценки", "view:marks")])
+            content = "<b>📚 Оценки по предметам</b>\nВыбери предмет." if names else "<b>📚 Оценки по предметам</b>\nПока оценок нет."
+            await present(call, content, buttons(*rows))
+        elif parts[1] == "subject":
+            index = int(parts[2])
+            content = await asyncio.to_thread(subject_marks, call.message.chat.id, index, parts[3] if len(parts) == 4 else None)
+            if content is None:
+                await call.message.answer("Список предметов изменился. Открой его заново.", reply_markup=buttons([("← Предметы", "marks:subjects")]), protect_content=True)
+                return
+            await present(call, content, buttons([("← Предметы", "marks:subjects"), ("🏠 Меню", "view:home")]))
+    except Exception:
+        logger.exception("Subject marks failed for chat %s", call.message.chat.id)
+        await call.message.answer("Оценки пока недоступны. Попробуй позже.", reply_markup=back_keyboard(), protect_content=True)
 
 
 def homework_attachments(chat_id, offset, lesson_index=None, file_index=None):
@@ -422,6 +517,8 @@ async def view(call: CallbackQuery):
         years = user["profile"].get("availableEduYears") or list(range(current, current - 5, -1))
         rows = [[(f"{y}/{y+1}", f"view:grades:{y}") for y in years[i:i+2]] for i in range(0, len(years), 2)]
         markup = buttons(*rows, [("← Меню", "view:home")])
+    elif kind == "marks":
+        markup = buttons([("📚 По предметам", "marks:subjects")], [("🏠 Меню", "view:home")])
     else:
         markup = back_keyboard()
     await present(call, content, markup)

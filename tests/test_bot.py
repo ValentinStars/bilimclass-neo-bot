@@ -14,6 +14,8 @@ from bilim_neo.attachments import AttachmentError, MAX_FILE_BYTES, StreamedAttac
 from bilim_neo.bot_store import BotStore
 from bilim_neo.client import BilimClassClient
 from bilim_neo.bot_views import schedule_view, marks_view, advice_view, dashboard_view, day, parse_day, week_view
+from bilim_neo.bot_views import checklist_view, subject_marks_view
+from bilim_neo.planner import tasks_for_day, task_progress
 from bilim_neo import bot
 
 
@@ -93,6 +95,33 @@ class ViewsTest(unittest.TestCase):
         self.assertIn("4/10", marks_view(marks, 1))
         self.assertIn("Алгебра", advice_view(SCHEDULE, marks, date(2026, 9, 28)))
 
+    def test_checklist_and_subject_history(self):
+        target = date(2026, 9, 28)
+        tasks = tasks_for_day(LOCALIZED_SCHEDULE, target)
+        self.assertEqual(len(tasks), 2)
+        self.assertEqual(task_progress(tasks, {tasks[0]["key"]}), (1, 2))
+        self.assertIn("1 из 2 выполнено", checklist_view(tasks, {tasks[0]["key"]}, target))
+        keyboard = bot.plan_keyboard(tasks, set(), 0, target)
+        self.assertIn(tasks[0]["key"], keyboard.inline_keyboard[0][0].callback_data)
+        self.assertIn("20260928", keyboard.inline_keyboard[0][0].callback_data)
+        marks = [{"subject": "Алгебра", "date": "28.09.2026", "regular_mark": 8},
+                 {"subject": "История", "date": "28.09.2026", "regular_mark": 9}]
+        subject = subject_marks_view(marks, "Алгебра", 1)
+        self.assertIn("Алгебра", subject)
+        self.assertNotIn("История", subject)
+
+    def test_stale_checklist_button_does_not_toggle_another_day(self):
+        target = date(2026, 9, 28)
+        tasks = tasks_for_day(LOCALIZED_SCHEDULE, target)
+        fake_store = SimpleNamespace(user=lambda _: {"login": "student"}, toggle_homework_done=AsyncMock())
+        message = SimpleNamespace(chat=SimpleNamespace(id=7, type="private"), answer=AsyncMock())
+        query = SimpleNamespace(data=f"task:toggle:0:0:20260929:{tasks[0]['key']}", message=message, answer=AsyncMock())
+        with patch.object(bot, "store", fake_store, create=True), \
+             patch.object(bot.asyncio, "to_thread", new_callable=AsyncMock, return_value=(target, tasks)):
+            asyncio.run(bot.task(query))
+        fake_store.toggle_homework_done.assert_not_awaited()
+        self.assertIn("измени", message.answer.call_args.args[0])
+
 
 class AutomationTest(unittest.TestCase):
     def test_quiet_interval_crosses_midnight(self):
@@ -162,6 +191,18 @@ class AttachmentTest(unittest.TestCase):
 
 
 class StoreTest(unittest.TestCase):
+    def test_homework_checklist_is_encrypted_and_toggles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "neo.sqlite3"
+            store = BotStore(str(path), Fernet.generate_key().decode())
+            store.save_user(7, "student", "password", {})
+            self.assertEqual(store.toggle_homework_done(7, "2026-09-28", "private-task-key"), {"private-task-key"})
+            self.assertEqual(store.homework_done(7, "2026-09-28"), {"private-task-key"})
+            self.assertNotIn(b"private-task-key", path.read_bytes())
+            self.assertEqual(store.toggle_homework_done(7, "2026-09-28", "private-task-key"), set())
+            store.delete_user(7)
+            self.assertEqual(store.homework_done(7, "2026-09-28"), set())
+
     def test_private_data_encrypted_and_outbox_durable(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "neo.sqlite3"

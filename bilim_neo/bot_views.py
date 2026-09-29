@@ -75,6 +75,13 @@ def lesson_count(number):
     return f"{number} уроков"
 
 
+def progress_bar(completed, total, width=5):
+    if total <= 0:
+        return ""
+    filled = round(width * completed / total)
+    return "▰" * filled + "▱" * (width - filled)
+
+
 def times(timeslot):
     found = re.findall(r"(?<!\d)(?:[01]?\d|2[0-3]):[0-5]\d", str(timeslot or ""))
     return found[:2]
@@ -169,7 +176,7 @@ def week_view(schedule, reference: date | None = None):
     return fit(lines)
 
 
-def dashboard_view(schedule, target: date, now: datetime):
+def dashboard_view(schedule, target: date, now: datetime, progress=None):
     selected = day(schedule, target)
     lines = [f"<b>НЭО · {WEEKDAYS[target.weekday()]}, {target:%d.%m}</b>", ""]
     if not selected:
@@ -198,12 +205,17 @@ def dashboard_view(schedule, target: date, now: datetime):
         lines.append(f"Сейчас · <b>{h(item.get('label') or 'Урок')}</b> до {slot[-1]}")
     if upcoming:
         item, slot = upcoming
-        lines.append(f"Дальше · <b>{h(item.get('label') or 'Урок')}</b> в {slot[0]}")
+        wait = minutes(slot[0]) - now_minute
+        when = f"через {wait} мин" if wait <= 60 else f"в {slot[0]}"
+        lines.append(f"Дальше · <b>{h(item.get('label') or 'Урок')}</b> {when}")
     elif not current:
         lines.append("Уроки на сегодня закончились.")
     homework = sum(bool(item.get("homeworkBody") or item.get("hasFiles") or item.get("homeworkBooks")) for item in lessons)
     if homework:
-        lines.append(f"📝 ДЗ на сегодня: {homework}")
+        if progress is None:
+            lines.append(f"📝 ДЗ на сегодня: {homework}")
+        else:
+            lines.append(f"📝 ДЗ: {progress_bar(*progress)}  {progress[0]}/{progress[1]}")
     lines.append("\nОткрой нужный раздел ниже.")
     return fit(lines)
 
@@ -228,6 +240,44 @@ def mark_lines(marks, limit=20):
 def marks_view(marks, period):
     entries = mark_lines(marks)
     return fit([f"<b>Оценки · {period} четверть</b>", *entries], "\n\n") if entries else f"<b>Оценки · {period} четверть</b>\nПока оценок нет."
+
+
+def subject_marks_view(marks, subject, period):
+    selected = [row for row in marks if row.get("subject") == subject]
+    entries = []
+    for row in reversed(selected):
+        scores = []
+        comments = []
+        for key, label in (("regular", "ФО"), ("sor", "СОР"), ("soch", "СОЧ"), ("po", "ПО")):
+            score = row.get(key + "_mark")
+            if score is None:
+                continue
+            maximum = row.get(key + "_max")
+            scores.append(f"{label} <b>{h(score)}{'/' + h(maximum) if maximum is not None else ''}</b>")
+            if row.get(key + "_comment"):
+                comments.append("💬 " + h(row[key + "_comment"])[:250])
+        if scores:
+            entries.append(f"<b>{h(row.get('date'))}</b> · " + "  ·  ".join(scores))
+            entries.extend(comments)
+        if len(entries) >= 60:
+            break
+    title = f"<b>{h(subject)}</b> · {period} четверть"
+    return fit([title, *entries], "\n\n") if entries else title + "\nОценок по предмету пока нет."
+
+
+def checklist_view(tasks, done, target):
+    completed = sum(task["key"] in done for task in tasks)
+    lines = [f"<b>✅ План ДЗ · {target:%d.%m}</b>",
+             f"{progress_bar(completed, len(tasks))}  {completed} из {len(tasks)} выполнено" if tasks else "На этот день заданий нет.", ""]
+    for task in tasks:
+        lesson = task["lesson"]
+        marker = "✅" if task["key"] in done else "○"
+        lines.append(f"{marker} <b>{h(lesson.get('label') or 'Урок')}</b>")
+        if lesson.get("homeworkBody"):
+            lines.append("   " + h(lesson["homeworkBody"])[:160])
+        if lesson.get("hasFiles"):
+            lines.append("   📎 Есть файлы")
+    return fit(lines)
 
 
 def attendance_view(marks, grades):

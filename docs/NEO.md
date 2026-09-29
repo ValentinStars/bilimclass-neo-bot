@@ -15,7 +15,7 @@ This file is for the next coding agent. Read `AGENTS.md` before making changes. 
 2. **Database migrations.** Add a schema version and forward-only migrations before changing persisted profiles or snapshots. Test upgrading a populated fixture database.
 3. **Notification quality.** Include exact subject and changed homework in alerts; cap long text. Add user-selectable quiet hours and daily briefing time. Keep outbox semantics and prevent daily rollover from looking like a schedule edit.
 4. **Operational readiness.** Add bounded concurrency, retry/backoff for BilimClass 429/5xx, health signals, and backup/restore instructions. Review rate limits and BilimClass terms before scaling beyond a small private deployment.
-5. **Student experience.** Add week navigation, subject-specific mark history, homework checklist, and localized Kazakh copy after validating the underlying data. Keep flows short and accessible.
+5. **Student experience.** Week navigation, subject-specific mark history, and a local homework checklist are in place. Next validate more diary fields and add localized Kazakh copy where the underlying data supports it. Keep flows short and accessible.
 
 ## API extension recipe
 
