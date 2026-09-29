@@ -15,7 +15,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import BotCommand, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import BotCommand, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, BufferedInputFile, InputMediaPhoto
 from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
 
@@ -28,7 +28,7 @@ from .bot_views import (advice_view, attendance_view, dashboard_view, day,
 from .client import BilimClassClient
 from .planner import tasks_for_day, task_progress
 from .lord_bonus import bonus_for_class, is_lord_school
-from . import admin_tools
+from . import admin_tools, recovery, visuals
 
 
 TZ = ZoneInfo("Asia/Almaty")
@@ -72,6 +72,10 @@ def buttons(*rows, prefs=None):
 
 
 def home_keyboard(prefs=None):
+    if (prefs or {}).get("local_admin"):
+        return buttons([("Управление", "admin:home"), ("Обращения", "support:inbox")],
+                       [("Оформление", "look:open"), ("Настройки", "view:settings")],
+                       [("Войти заново", "auth:start")], prefs=prefs)
     planner = (prefs or {}).get("planner", True)
     rows = [
         [("📅 Сегодня", "view:day:0", "primary"), ("🌅 Завтра", "view:day:1")],
@@ -84,7 +88,7 @@ def home_keyboard(prefs=None):
         rows.append([("⚙️ Настройки", "view:settings")])
     else:
         rows.append([("💡 Советы", "view:advice"), ("⚙️ Настройки", "view:settings")])
-    rows.append([("🎟 Пригласить друга", "ref:link")])
+    rows.append([("🎟 Пригласить друга", "ref:link"), ("✉️ Обратная связь", "support:new")])
     return buttons(*rows, prefs=prefs)
 
 
@@ -92,8 +96,38 @@ def back_keyboard(prefs=None):
     return buttons([("← Главное меню", "view:home")], prefs=prefs)
 
 
+async def send_screen(message, content, markup, prefs=None, section="home", animate=False):
+    prefs = prefs or {}
+    if prefs.get("theme") != "board":
+        return await message.answer(content, reply_markup=markup, protect_content=True)
+    long = len(content) > 1000
+    caption = "Подробности ниже ↓" if long else content
+    keyboard = None if long else markup
+    if animate and prefs.get("animations", True):
+        await message.answer_animation(BufferedInputFile(await asyncio.to_thread(visuals.welcome_animation), filename="neo.gif"), caption=caption, reply_markup=keyboard, protect_content=True)
+    else:
+        await message.answer_photo(BufferedInputFile(await asyncio.to_thread(visuals.card_bytes, section, content), filename="neo-panel.png"), caption=caption, reply_markup=keyboard, protect_content=True)
+    if long:
+        return await message.answer(content, reply_markup=markup, protect_content=True)
+
+
 async def present(call: CallbackQuery, content: str, markup):
     """Reuse the current panel; keep delivered alerts as a readable history."""
+    current_store = globals().get("store")
+    chat_id = getattr(getattr(call.message, "chat", None), "id", None)
+    user = current_store.user(chat_id) if current_store and chat_id else None
+    prefs = user["prefs"] if user else {}
+    section = visuals.section_for(getattr(call, "data", None))
+    if prefs.get("theme") == "board":
+        if getattr(call.message, "photo", None) and len(content) <= 1000:
+            media = InputMediaPhoto(media=BufferedInputFile(await asyncio.to_thread(visuals.card_bytes, section, content), filename="neo-panel.png"), caption=content)
+            try:
+                await call.message.edit_media(media, reply_markup=markup)
+            except TelegramBadRequest as exc:
+                if "message is not modified" not in str(exc).lower():
+                    raise
+            return
+        return await send_screen(call.message, content, markup, prefs, section)
     if call.message.text is None:
         await call.message.answer(content, reply_markup=markup, protect_content=True)
         return
@@ -157,9 +191,10 @@ def settings_keyboard(prefs, chat_id=None, profile=None, bonus_visible=True):
              [(f"{'✅' if prefs['button_colors'] else '⬜'} Цветные кнопки", "toggle:button_colors")],
              [("🌙 Тихие часы", "view:quiet")],
              [("🔐 Профиль", "view:profile"), ("🏠 Меню", "view:home")]]
+    rows.insert(-1, [("🎨 Оформление", "look:open"), ("✉️ Обратная связь", "support:new")])
     if bonus_visible and profile and is_lord_school(profile.get("schoolName")):
         rows.insert(-1, [(f"{'✅' if prefs['lord_bonus'] else '⬜'} BONUS LORD", "toggle:lord_bonus"), ("🪙 Открыть", "view:bonus")])
-    if chat_id is not None and admin_tools.allowed(chat_id):
+    if chat_id is not None and admin_tools.allowed(chat_id, globals().get("store")):
         rows.insert(-1, [(f"{'✅' if prefs['admin_enabled'] else '⬜'} Админ-панель", "toggle:admin_enabled")])
         if prefs["admin_enabled"]:
             rows.insert(-1, [("🛠 Открыть админ-панель", "admin:home")])
@@ -180,6 +215,8 @@ def referral_inviter(payload):
 
 
 def new_client(user):
+    if user["profile"].get("account_kind") == "local_admin":
+        raise RuntimeError("Локальный администратор не подключён к BilimClass")
     client = BilimClassClient(user["login"], user["password"])
     try:
         client.login()
@@ -206,7 +243,7 @@ def fetch(chat_id, kind, offset=0, year=None):
     try:
         latest = client.get_profile()
         profile = {key: latest.get(key) for key in ("fio", "group", "schoolName", "schoolAddress", "region", "currentEduYear", "availableEduYears")}
-        if profile != user["profile"]:
+        if any(user["profile"].get(k) != v for k, v in profile.items()):
             store.update_profile(chat_id, profile)
             user["profile"] = profile
         now = datetime.now(TZ)
@@ -439,13 +476,18 @@ async def start(message: Message, state: FSMContext):
     user = store.user(message.chat.id)
     if user:
         store.record_activity(message.chat.id, "menu")
-        try:
-            content = await asyncio.to_thread(fetch, message.chat.id, "dashboard")
-        except Exception:
-            content = "<b>НЭО · твой школьный день</b>\nРасписание пока не загрузилось. Разделы доступны ниже."
-        await message.answer(content, reply_markup=home_keyboard(user["prefs"]), protect_content=True)
+        if user["profile"].get("account_kind") == "local_admin":
+            content = "<b>Запасной администратор</b>\n" + ("Сессия активна до 12 часов после входа. /logout — выйти." if admin_tools.allowed(message.chat.id, store) else "Сессия истекла. /recovery — войти снова.")
+        else:
+            try:
+                content = await asyncio.to_thread(fetch, message.chat.id, "dashboard")
+            except Exception:
+                content = "<b>НЭО · твой школьный день</b>\nРасписание пока не загрузилось. Разделы доступны ниже."
+        content = f"<b>Привет, {h(message.from_user.first_name or 'друг')}! Как учёба?</b>\n\n" + content
+        await send_screen(message, content, home_keyboard(user["prefs"]), user["prefs"], animate=True)
     else:
-        await message.answer("<b>Привет, я НЭО.</b>\nСоберу расписание, задания и оценки в одном месте и вовремя напомню о важном.\n\nПодключи дневник в личном чате:", reply_markup=buttons([("🔐 Подключить дневник", "auth:start")]), protect_content=True)
+        from .experience import onboarding
+        await onboarding(message)
 
 
 @router.message(Command("cancel"))
@@ -469,8 +511,21 @@ async def auth_start(call: CallbackQuery, state: FSMContext):
     await call.answer()
     if call.message.chat.type != "private":
         return
+    if not store.user(call.from_user.id) and not store.visitor(call.from_user.id).get("appearance_chosen"):
+        store.update_visitor(call.from_user.id, theme="compact", appearance_chosen=True)
+    await state.clear()
     await state.set_state(Login.username)
     await call.message.answer("Отправь <b>логин BilimClass</b>. Я удалю сообщение после получения. /cancel — отмена.", protect_content=True)
+
+
+@router.message(Command("recovery"))
+async def recovery_start(message: Message, state: FSMContext):
+    if not private(message):
+        return
+    await state.clear()
+    await state.update_data(auth_mode="recovery")
+    await state.set_state(Login.username)
+    await message.answer("<b>Запасной вход администратора</b>\nВведи локальный логин. /cancel — отмена.", protect_content=True)
 
 
 @router.message(Login.username)
@@ -497,6 +552,20 @@ async def auth_password(message: Message, state: FSMContext):
         pass
     data = await state.get_data()
     await state.clear()
+    if data.get("auth_mode") == "recovery" or recovery.matches_login(data.get("username", "")):
+        success = await asyncio.to_thread(recovery.login, store, message.chat.id, data["username"], password)
+        if not success:
+            await message.answer("Не удалось войти. Проверь данные. После пяти попыток вход приостанавливается на 15 минут.", reply_markup=buttons([("Повторить", "auth:start")]), protect_content=True)
+            return
+        user = store.user(message.chat.id)
+        store.record_activity(message.chat.id, "login")
+        for raw_id in os.getenv("ADMIN_IDS", "").split(","):
+            if raw_id.strip().isdigit():
+                owner_id = int(raw_id.strip())
+                if owner_id != message.chat.id and store.user(owner_id):
+                    store.enqueue(owner_id, f"recovery:{message.chat.id}:{message.message_id}", f"<b>Запасной администратор вошёл</b>\n{h(admin_tools.identity_label(message.chat.id, user['profile']))}\nДоступ действует 12 часов. Сбросить все запасные входы можно в админ-панели.")
+        await send_screen(message, "<b>Запасной администратор подключён</b>\nДоступ действует 12 часов. /logout — завершить вход.", home_keyboard(user["prefs"]), user["prefs"], "admin")
+        return
     try:
         def verify():
             client = BilimClassClient(data["username"], password)
@@ -514,7 +583,8 @@ async def auth_password(message: Message, state: FSMContext):
     store.record_activity(message.chat.id, "login")
     if is_new:
         store.complete_referral(message.chat.id, f"<b>🎟 Друг подключился по твоей ссылке</b>\n{h(profile.get('fio'))} · {h(profile.get('group'))}. Спасибо за приглашение!")
-    await message.answer(f"Готово, <b>{h(profile.get('fio'))}</b>! Дневник подключён.\nУведомления можно настроить отдельно для каждого события.", reply_markup=home_keyboard(store.user(message.chat.id)["prefs"]), protect_content=True)
+    prefs = store.user(message.chat.id)["prefs"]
+    await send_screen(message, f"Готово, <b>{h(profile.get('fio'))}</b>! Дневник подключён.\nУведомления можно настроить отдельно для каждого события.", home_keyboard(prefs), prefs)
 
 
 @router.callback_query(F.data.startswith("toggle:"))
@@ -527,7 +597,7 @@ async def toggle(call: CallbackQuery):
         await call.answer("Сначала подключи дневник", show_alert=True)
         return
     key = call.data.split(":", 1)[1]
-    if key == "admin_enabled" and not admin_tools.allowed(call.from_user.id):
+    if key == "admin_enabled" and not admin_tools.allowed(call.from_user.id, store):
         await call.answer("Доступ закрыт", show_alert=True)
         return
     if key == "lord_bonus" and not is_lord_school(user["profile"].get("schoolName")):
@@ -559,7 +629,7 @@ async def quiet(call: CallbackQuery):
     store.set_pref(call.message.chat.id, "quiet_from", start)
     store.set_pref(call.message.chat.id, "quiet_to", end)
     await call.answer("Тихие часы сохранены")
-    await call.message.edit_text(f"<b>Тихие часы</b> · {start:02d}:00–{end:02d}:00\nУведомления придут после окончания паузы.", reply_markup=quiet_keyboard(user["prefs"]))
+    await present(call, f"<b>Тихие часы</b> · {start:02d}:00–{end:02d}:00\nУведомления придут после окончания паузы.", quiet_keyboard(user["prefs"]))
 
 
 def quiet_keyboard(prefs=None):
@@ -595,6 +665,10 @@ async def view(call: CallbackQuery):
     kind = parts[1]
     if kind == "home":
         store.record_activity(call.from_user.id, "menu")
+        if user["profile"].get("account_kind") == "local_admin":
+            content = "<b>Запасной администратор</b>\n" + ("Управление ботом и обращения учеников." if admin_tools.allowed(call.from_user.id, store) else "Сессия истекла. /recovery — войти снова.")
+            await present(call, content, home_keyboard(user["prefs"]))
+            return
         try:
             content = await asyncio.to_thread(fetch, call.message.chat.id, "dashboard")
         except Exception:
@@ -624,7 +698,7 @@ async def view(call: CallbackQuery):
         return
     if kind == "profile":
         p = user["profile"]
-        await present(call, f"<b>Профиль</b>\n{h(p.get('fio'))}\n{h(p.get('group'))} · {h(p.get('schoolName'))}\nУчебный год: {h(p.get('currentEduYear'))}\n\nОтключить дневник и удалить данные: /logout", back_keyboard(user["prefs"]))
+        await present(call, f"<b>Профиль</b>\n{h(p.get('fio'))}\n{h(admin_tools.identity_label(call.from_user.id, p))}\n{h(p.get('group'))} · {h(p.get('schoolName'))}\nУчебный год: {h(p.get('currentEduYear'))}\n\nОтключить дневник и удалить данные: /logout", back_keyboard(user["prefs"]))
         return
     if kind not in ("day", "bells", "homework", "week", "advice", "marks", "grades", "attendance"):
         return
@@ -736,6 +810,8 @@ async def notifications(bot: Bot, interval: int):
         async with slots:
             try:
                 user = store.user(chat_id)
+                if user["profile"].get("account_kind") == "local_admin":
+                    return
                 if quiet_now(user["prefs"], now.hour):
                     return
                 if sync_due:
@@ -778,9 +854,13 @@ async def main():
     logging.basicConfig(level=logging.INFO)
     bot = Bot(token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
+    from .experience import router as experience_router, IdentityMiddleware
+    dp.message.outer_middleware(IdentityMiddleware())
+    dp.callback_query.outer_middleware(IdentityMiddleware())
     dp.include_router(router)
     from .admin_panel import router as admin_router
     dp.include_router(admin_router)
+    dp.include_router(experience_router)
     await bot.set_my_commands([BotCommand(command=c, description=d) for c, d in (
         ("start", "Открыть дневник"), ("menu", "Главное меню"),
         ("logout", "Отключить дневник"), ("cancel", "Отменить ввод"), ("admin", "Панель администратора"))])

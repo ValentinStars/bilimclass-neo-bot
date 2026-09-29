@@ -30,7 +30,7 @@ def core():
 def admitted(chat_id):
     app = core()
     user = app.store.user(chat_id)
-    return bool(admin_tools.allowed(chat_id) and user and user["prefs"]["admin_enabled"])
+    return bool(admin_tools.allowed(chat_id, app.store) and user and user["prefs"]["admin_enabled"])
 
 
 async def guard(call):
@@ -47,6 +47,7 @@ def keyboard(chat_id):
     return app.buttons(
         [("🖥 Сервер", "admin:server"), ("📈 Активность", "admin:chart")],
         [("📊 Классы", "admin:classes")],
+        [("✉️ Обратная связь", "support:inbox"), ("🔐 Сбросить запасные входы", "support:revoke")],
         [("👥 Пользователи", "admin:users:0"), ("📋 Активность", "admin:activity")],
         [("📜 Логи", "admin:logs"), ("📣 Объявление", "admin:broadcast")],
         [("🪙 BONUS LORD", "admin:bonus"), ("⬇️ Выгрузки", "admin:exports")],
@@ -109,7 +110,7 @@ async def panel(call: CallbackQuery, state: FSMContext):
         lines = []
         for ident in ids[page*10:(page+1)*10]:
             p = app.store.user(ident)["profile"]
-            lines.append(f"• <code>{ident}</code> · {app.h(p.get('fio'))} · {app.h(p.get('group'))} · {app.h(p.get('schoolName'))}")
+            lines.append(f"• {app.h(admin_tools.identity_label(ident, p))} · {app.h(p.get('fio'))} · {app.h(p.get('group'))} · {app.h(p.get('schoolName'))}")
         rows = []
         if page:
             rows.append(("←", f"admin:users:{page-1}"))
@@ -145,7 +146,7 @@ async def panel(call: CallbackQuery, state: FSMContext):
                 [("Отмена", "admin:exports")], prefs=prefs))
             return
         if kind == "activity":
-            payload = admin_tools.activity_csv(app.store.activity_counts())
+            payload = admin_tools.activity_csv(app.store.activity_counts(), [(i, app.store.user(i)) for i in app.store.users()])
             name = "neo-activity-14d.csv"
         elif kind == "logs":
             try:
@@ -192,7 +193,8 @@ async def panel(call: CallbackQuery, state: FSMContext):
             await call.message.answer(f"Аудитория: все {len(users)} учеников. Отправь сообщение, фото, видео, аудио, файл, голосовое или стикер. /cancel — отмена.")
         elif scope in ("class", "school", "city", "student"):
             options = admin_tools.audiences(users)[scope]
-            rows = [[(f"{value[:45]} · {len(admin_tools.recipients(users, scope, value))}", f"admin:pick:{scope}:{index}")] for index, value in enumerate(options[:50])]
+            labels = {str(i): admin_tools.identity_label(i, u['profile']) for i, u in users}
+            rows = [[(f"{(labels.get(value, value) if scope == 'student' else value)[:45]} · {len(admin_tools.recipients(users, scope, value))}", f"admin:pick:{scope}:{index}")] for index, value in enumerate(options[:50])]
             rows.append([("← Объявление", "admin:broadcast")])
             await app.present(call, "<b>Аудитория</b>\nВыбери точное значение. Неизвестный город не включается в рассылку.", app.buttons(*rows, prefs=prefs))
     elif action == "pick":
@@ -204,7 +206,8 @@ async def panel(call: CallbackQuery, state: FSMContext):
         value = options[index]
         await state.update_data(scope=scope, value=value)
         await state.set_state(Draft.message)
-        await call.message.answer(f"Аудитория: {html.escape(value)}. Отправь содержимое объявления одним сообщением. /cancel — отмена.")
+        label = admin_tools.identity_label(int(value), app.store.user(int(value))["profile"]) if scope == "student" else value
+        await call.message.answer(f"Аудитория: {html.escape(label)}. Отправь содержимое объявления одним сообщением. /cancel — отмена.")
     elif action == "send":
         if await state.get_state() != Draft.confirm:
             await call.message.answer("Черновик устарел. Создай объявление заново.")

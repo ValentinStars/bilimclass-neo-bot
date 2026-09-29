@@ -22,6 +22,8 @@ DEFAULT_PREFS = {
     "button_colors": True,
     "admin_enabled": False,
     "lord_bonus": True,
+    "theme": "compact",
+    "animations": True,
     "quiet_from": 22,
     "quiet_to": 7,
 }
@@ -80,6 +82,16 @@ class BotStore:
                 CREATE TABLE IF NOT EXISTS app_settings (
                     key TEXT PRIMARY KEY, value TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS visitors (chat_id INTEGER PRIMARY KEY, content BLOB NOT NULL);
+                CREATE TABLE IF NOT EXISTS admin_sessions (
+                    chat_id INTEGER PRIMARY KEY REFERENCES users(chat_id) ON DELETE CASCADE,
+                    expires_at REAL NOT NULL, fingerprint TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS rate_limits (key TEXT PRIMARY KEY, started REAL NOT NULL, attempts INTEGER NOT NULL);
+                CREATE TABLE IF NOT EXISTS feedback (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER NOT NULL,
+                    content BLOB NOT NULL, created_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open'
+                );
             """)
         os.chmod(self.path, 0o600)
 
@@ -123,12 +135,73 @@ class BotStore:
             row = db.execute("SELECT login,password,prefs,profile FROM users WHERE chat_id=?", (chat_id,)).fetchone()
         if row is None:
             return None
+        visitor = self.visitor(chat_id)
+        profile = self._open(row[3])
         return {
             "login": self.cipher.decrypt(row[0]).decode(),
             "password": self.cipher.decrypt(row[1]).decode(),
-            "prefs": {**DEFAULT_PREFS, **self._open(row[2])},
-            "profile": self._open(row[3]),
+            "prefs": {**DEFAULT_PREFS, **self._open(row[2]), **{k: visitor[k] for k in ("theme", "animations") if k in visitor}, "local_admin": profile.get("account_kind") == "local_admin"},
+            "profile": {**profile, **{k: visitor[k] for k in ("telegram_username", "telegram_name") if k in visitor}},
         }
+
+    def visitor(self, chat_id):
+        with self._db() as db:
+            row = db.execute("SELECT content FROM visitors WHERE chat_id=?", (chat_id,)).fetchone()
+        return self._open(row[0]) if row else {}
+
+    def update_visitor(self, chat_id, **values):
+        with self._db() as db:
+            row = db.execute("SELECT content FROM visitors WHERE chat_id=?", (chat_id,)).fetchone()
+            data = self._open(row[0]) if row else {}
+            data.update(values)
+            db.execute("INSERT INTO visitors VALUES (?,?) ON CONFLICT(chat_id) DO UPDATE SET content=excluded.content", (chat_id, self._seal(data)))
+
+    def rate_limit(self, key, limit, seconds):
+        import time
+        now = time.time()
+        with self._db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("DELETE FROM rate_limits WHERE started<?", (now - 86400,))
+            row = db.execute("SELECT started,attempts FROM rate_limits WHERE key=?", (key,)).fetchone()
+            started, attempts = row if row and now-row[0] < seconds else (now, 0)
+            if attempts >= limit:
+                return False
+            db.execute("INSERT INTO rate_limits VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET started=excluded.started,attempts=excluded.attempts", (key, started, attempts+1))
+        return True
+
+    def grant_admin(self, chat_id, fingerprint, seconds=43200):
+        import time
+        with self._db() as db:
+            db.execute("INSERT INTO admin_sessions VALUES (?,?,?) ON CONFLICT(chat_id) DO UPDATE SET expires_at=excluded.expires_at,fingerprint=excluded.fingerprint", (chat_id, time.time()+seconds, fingerprint))
+
+    def has_admin_session(self, chat_id, fingerprint):
+        import time
+        with self._db() as db:
+            return bool(db.execute("SELECT 1 FROM admin_sessions WHERE chat_id=? AND expires_at>? AND fingerprint=?", (chat_id, time.time(), fingerprint)).fetchone())
+
+    def revoke_admin_sessions(self):
+        with self._db() as db:
+            db.execute("DELETE FROM admin_sessions")
+
+    def add_feedback(self, chat_id, content):
+        with self._db() as db:
+            db.execute("DELETE FROM feedback WHERE created_at<?", ((datetime.now(timezone.utc)-timedelta(days=90)).isoformat(),))
+            cursor = db.execute("INSERT INTO feedback(chat_id,content,created_at) VALUES (?,?,?)", (chat_id, self._seal(content), utc_now()))
+            return cursor.lastrowid
+
+    def feedback_list(self, limit=10):
+        with self._db() as db:
+            rows = db.execute("SELECT id,chat_id,content,created_at,status FROM feedback ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        return [(i, c, self._open(payload), created, status) for i, c, payload, created, status in rows]
+
+    def feedback_item(self, item_id):
+        with self._db() as db:
+            row = db.execute("SELECT chat_id,content,status FROM feedback WHERE id=?", (item_id,)).fetchone()
+        return (row[0], self._open(row[1]), row[2]) if row else None
+
+    def close_feedback(self, item_id):
+        with self._db() as db:
+            db.execute("UPDATE feedback SET status='answered' WHERE id=?", (item_id,))
 
     def users(self):
         with self._db() as db:
@@ -210,6 +283,9 @@ class BotStore:
     def set_pref(self, chat_id: int, key: str, value):
         if key not in DEFAULT_PREFS:
             raise ValueError("Unknown preference")
+        if key in ("theme", "animations"):
+            self.update_visitor(chat_id, **{key: value})
+            return
         user = self.user(chat_id)
         user["prefs"][key] = value
         with self._db() as db:
@@ -269,6 +345,9 @@ class BotStore:
     def delete_user(self, chat_id: int):
         with self._db() as db:
             db.execute("DELETE FROM users WHERE chat_id=?", (chat_id,))
+            db.execute("DELETE FROM visitors WHERE chat_id=?", (chat_id,))
+            db.execute("DELETE FROM feedback WHERE chat_id=?", (chat_id,))
+            db.execute("DELETE FROM pending_referrals WHERE invited_chat_id=?", (chat_id,))
 
 
 def utc_now():

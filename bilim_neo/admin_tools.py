@@ -11,8 +11,15 @@ from datetime import datetime, timedelta, timezone
 from PIL import Image, ImageDraw, ImageFont
 
 
-def allowed(chat_id):
-    return str(chat_id) in {part.strip() for part in os.getenv("ADMIN_IDS", "").split(",") if part.strip().isdigit()}
+def allowed(chat_id, store=None):
+    from . import recovery
+    owner = str(chat_id) in {part.strip() for part in os.getenv("ADMIN_IDS", "").split(",") if part.strip().isdigit()}
+    return owner or bool(store and recovery.active(store, chat_id))
+
+
+def identity_label(chat_id, profile):
+    username = profile.get("telegram_username")
+    return f"{chat_id}" + (f" · @{username}" if username else "")
 
 
 def city(profile):
@@ -56,8 +63,9 @@ def credentials_csv(users):
     return csv_bytes([["login", "password", "class"]] + [[u["login"], u["password"], u["profile"].get("group") or ""] for _, u in users])
 
 
-def activity_csv(counts):
-    return csv_bytes([["telegram_id", "events_14d", "last_event_utc"]] + counts["users"])
+def activity_csv(counts, users=()):
+    names = {i: u["profile"].get("telegram_username") or "" for i, u in users}
+    return csv_bytes([["telegram_id", "username", "events_14d", "last_event_utc"]] + [(i, names.get(i, ""), n, last) for i, n, last in counts["users"]])
 
 
 def server_report(db_path):
@@ -107,15 +115,15 @@ def journal(limit=None):
 
 def activity_chart(counts, registrations):
     """Render a compact, legible PNG without writing student data to disk."""
-    image = Image.new("RGB", (1200, 690), "#0c1728")
+    image = Image.new("RGB", (1200, 690), "#151916")
     draw = ImageDraw.Draw(image)
     font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
     regular = ImageFont.truetype(font_path, 26)
     bold = ImageFont.truetype(font_path, 42)
     small = ImageFont.truetype(font_path, 18)
-    draw.rounded_rectangle((32, 32, 1168, 658), radius=34, fill="#14243c")
-    draw.text((75, 68), "НЭО / АКТИВНОСТЬ", font=bold, fill="#f5f8ff")
-    draw.text((76, 135), "Последние 14 дней · действия в боте", font=regular, fill="#98afc7")
+    draw.rounded_rectangle((32, 32, 1168, 658), radius=34, fill="#20261e")
+    draw.text((75, 68), "НЭО / АКТИВНОСТЬ", font=bold, fill="#f2f0e5")
+    draw.text((76, 135), "Последние 14 дней · действия в боте", font=regular, fill="#9ca69b")
     today = datetime.now(timezone.utc).date()
     daily = dict(counts["daily"])
     values = [(today - timedelta(days=13-index), daily.get((today - timedelta(days=13-index)).isoformat(), 0)) for index in range(14)]
@@ -124,11 +132,11 @@ def activity_chart(counts, registrations):
     for index, (day, value) in enumerate(values):
         x = left + index * (width / 14)
         height = max(3, round(value / peak * 245))
-        draw.rounded_rectangle((x, bottom-height, x+42, bottom), radius=10, fill="#47d6b0" if value else "#30435d")
+        draw.rounded_rectangle((x, bottom-height, x+42, bottom), radius=10, fill="#d4f66a" if value else "#3b4535")
         if value:
-            draw.text((x+11, bottom-height-29), str(value), font=small, fill="#e9fff7")
-        draw.text((x-2, bottom+20), day.strftime("%d.%m"), font=small, fill="#98afc7")
-    draw.text((76, 592), f"Подключено: {registrations}   •   Событий: {sum(v for _, v in values)}   •   Пик: {peak}", font=regular, fill="#e9f1fb")
+            draw.text((x+11, bottom-height-29), str(value), font=small, fill="#f2f0e5")
+        draw.text((x-2, bottom+20), day.strftime("%d.%m"), font=small, fill="#9ca69b")
+    draw.text((76, 592), f"Подключено: {registrations}   •   Событий: {sum(v for _, v in values)}   •   Пик: {peak}", font=regular, fill="#f2f0e5")
     buffer = io.BytesIO()
     image.save(buffer, format="PNG", optimize=True)
     return buffer.getvalue()
@@ -137,20 +145,20 @@ def activity_chart(counts, registrations):
 def classes_chart(users):
     counts = Counter((user["profile"].get("group") or "Класс неизвестен") for _, user in users)
     top = counts.most_common(8)
-    image = Image.new("RGB", (1200, 690), "#0c1728")
+    image = Image.new("RGB", (1200, 690), "#151916")
     draw = ImageDraw.Draw(image)
     font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
     title = ImageFont.truetype(font_path, 42)
     regular = ImageFont.truetype(font_path, 24)
-    draw.rounded_rectangle((32, 32, 1168, 658), radius=34, fill="#14243c")
-    draw.text((75, 68), "НЭО / КЛАССЫ", font=title, fill="#f5f8ff")
-    draw.text((75, 134), f"Подключено учеников: {len(users)} · классов: {len(counts)}", font=regular, fill="#98afc7")
+    draw.rounded_rectangle((32, 32, 1168, 658), radius=34, fill="#20261e")
+    draw.text((75, 68), "НЭО / КЛАССЫ", font=title, fill="#f2f0e5")
+    draw.text((75, 134), f"Подключено учеников: {len(users)} · классов: {len(counts)}", font=regular, fill="#9ca69b")
     peak = max([n for _, n in top], default=1)
     for index, (label, value) in enumerate(top):
         y = 207 + index * 53
-        draw.text((80, y), str(label)[:16], font=regular, fill="#e9f1fb")
-        draw.rounded_rectangle((300, y, 300 + max(5, round(value / peak * 690)), y+28), radius=10, fill="#5caaf4" if index % 2 else "#47d6b0")
-        draw.text((1020, y), str(value), font=regular, fill="#e9f1fb")
+        draw.text((80, y), str(label)[:16], font=regular, fill="#f2f0e5")
+        draw.rounded_rectangle((300, y, 300 + max(5, round(value / peak * 690)), y+28), radius=10, fill="#a5bd68" if index % 2 else "#d4f66a")
+        draw.text((1020, y), str(value), font=regular, fill="#f2f0e5")
     buffer = io.BytesIO()
     image.save(buffer, format="PNG", optimize=True)
     return buffer.getvalue()

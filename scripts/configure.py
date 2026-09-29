@@ -3,6 +3,7 @@
 import base64
 import binascii
 import getpass
+import hashlib
 import os
 import re
 import secrets
@@ -37,9 +38,8 @@ def valid_key(value):
 
 
 def save_config(path, values):
-    content = "".join(f"{key}={values[key]}\n" for key in (
-        "TELEGRAM_BOT_TOKEN", "BOT_ENCRYPTION_KEY", "BOT_DB_PATH", "POLL_INTERVAL_SECONDS", "ADMIN_IDS"
-    ))
+    fields = ("TELEGRAM_BOT_TOKEN", "BOT_ENCRYPTION_KEY", "BOT_DB_PATH", "POLL_INTERVAL_SECONDS", "ADMIN_IDS", "RECOVERY_ADMIN_LOGIN", "RECOVERY_ADMIN_HASH", "RECOVERY_ADMIN_PROFILE")
+    content = "".join(f"{key}={values.get(key, '')}\n" for key in fields)
     with tempfile.NamedTemporaryFile("w", dir=path.parent, prefix=".env.", delete=False) as handle:
         temporary = Path(handle.name)
         os.chmod(temporary, 0o600)
@@ -97,12 +97,30 @@ def main():
             break
         print("Укажите числовые Telegram ID через запятую.")
 
-    save_config(CONFIG, {
+    recovery_login = input(f"Логин запасного администратора [{existing.get('RECOVERY_ADMIN_LOGIN') or 'выключен'}], '-' отключить: ").strip()
+    recovery_hash = existing.get("RECOVERY_ADMIN_HASH", "")
+    if recovery_login == "-":
+        recovery_login, recovery_hash = "", ""
+    elif recovery_login:
+        if not re.fullmatch(r"[\w-]{3,80}", recovery_login):
+            raise SystemExit("Логин: 3–80 букв, цифр, дефисов или подчёркиваний.")
+        password = getpass.getpass("Новый пароль запасного администратора (минимум 12 символов): ")
+        if len(password) < 12 or password != getpass.getpass("Повторите пароль: "):
+            raise SystemExit("Пароли не совпали или слишком короткие. Настройки не изменены.")
+        salt = secrets.token_hex(16)
+        digest = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt), 600_000).hex()
+        recovery_hash = f"pbkdf2:{salt}:{digest}"
+    else:
+        recovery_login = existing.get("RECOVERY_ADMIN_LOGIN", "")
+
+    save_config(CONFIG, {**existing,
         "TELEGRAM_BOT_TOKEN": token,
         "BOT_ENCRYPTION_KEY": key,
         "BOT_DB_PATH": raw_path,
         "POLL_INTERVAL_SECONDS": str(minutes * 60),
         "ADMIN_IDS": admin_ids,
+        "RECOVERY_ADMIN_LOGIN": recovery_login,
+        "RECOVERY_ADMIN_HASH": recovery_hash,
     })
     print("Настройки сохранены в .env (доступ только владельцу файла).")
     print("Если бот уже запущен, примените настройки командой ./restart.sh")
