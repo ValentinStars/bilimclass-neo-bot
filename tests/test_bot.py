@@ -42,6 +42,8 @@ class ViewsTest(unittest.TestCase):
     def test_homework_and_empty_day(self):
         self.assertIn("№ 10 &amp; 11", schedule_view(SCHEDULE, date(2026, 9, 28), "homework"))
         self.assertIn("не вернул расписание", schedule_view(SCHEDULE, date(2026, 9, 29)))
+        long = {"days": [{"date": "28.09.2026", "subjects": [{"label": "Труд", "homeworkBody": "<&>" * 100}]}]}
+        self.assertIn("<blockquote expandable>", schedule_view(long, date(2026, 9, 28), "homework"))
 
     def test_live_api_date_shape_powers_each_distinct_view(self):
         target = date(2026, 9, 28)
@@ -77,8 +79,25 @@ class ViewsTest(unittest.TestCase):
         attachment = [button.callback_data for row in bot.date_keyboard("homework", 0).inline_keyboard for button in row]
         self.assertIn("files:list:0", attachment)
 
+    def test_optional_planner_and_colored_buttons(self):
+        hidden = bot.home_keyboard({"planner": False})
+        self.assertNotIn("task:open:0", [button.callback_data for row in hidden.inline_keyboard for button in row])
+        visible = bot.home_keyboard({"planner": True})
+        today = visible.inline_keyboard[0][0]
+        self.assertEqual(today.style, "primary")
+        self.assertEqual(visible.inline_keyboard[-2][0].style, "success")
+        hidden_day = bot.date_keyboard("homework", 0, {"planner": False})
+        self.assertNotIn("task:open:0", [button.callback_data for row in hidden_day.inline_keyboard for button in row])
+        self.assertIn("files:list:0", [button.callback_data for row in hidden_day.inline_keyboard for button in row])
+
+    def test_next_lesson_uses_telegram_relative_time(self):
+        now = datetime(2026, 9, 28, 8, 10, tzinfo=ZoneInfo("Asia/Almaty"))
+        screen = dashboard_view(LOCALIZED_SCHEDULE, now.date(), now)
+        self.assertIn("<tg-time unix=", screen)
+        self.assertIn('format="r"', screen)
+
     def test_callbacks_route_to_the_selected_view(self):
-        fake_store = SimpleNamespace(user=lambda chat_id: {"profile": {"currentEduYear": 2026}})
+        fake_store = SimpleNamespace(user=lambda chat_id: {"profile": {"currentEduYear": 2026}, "prefs": {"planner": True}})
         for callback, expected in (("view:day:0", "day"), ("view:bells:0", "bells"),
                                    ("view:homework:0", "homework"), ("view:week:0", "week")):
             with self.subTest(callback=callback), patch.object(bot, "store", fake_store, create=True), \
@@ -113,7 +132,7 @@ class ViewsTest(unittest.TestCase):
     def test_stale_checklist_button_does_not_toggle_another_day(self):
         target = date(2026, 9, 28)
         tasks = tasks_for_day(LOCALIZED_SCHEDULE, target)
-        fake_store = SimpleNamespace(user=lambda _: {"login": "student"}, toggle_homework_done=AsyncMock())
+        fake_store = SimpleNamespace(user=lambda _: {"login": "student", "prefs": {"planner": True}}, toggle_homework_done=AsyncMock())
         message = SimpleNamespace(chat=SimpleNamespace(id=7, type="private"), answer=AsyncMock())
         query = SimpleNamespace(data=f"task:toggle:0:0:20260929:{tasks[0]['key']}", message=message, answer=AsyncMock())
         with patch.object(bot, "store", fake_store, create=True), \
@@ -121,6 +140,25 @@ class ViewsTest(unittest.TestCase):
             asyncio.run(bot.task(query))
         fake_store.toggle_homework_done.assert_not_awaited()
         self.assertIn("измени", message.answer.call_args.args[0])
+
+    def test_disabled_planner_rejects_old_button(self):
+        fake_store = SimpleNamespace(user=lambda _: {"prefs": {"planner": False}}, toggle_homework_done=AsyncMock())
+        message = SimpleNamespace(chat=SimpleNamespace(id=7, type="private"), answer=AsyncMock())
+        query = SimpleNamespace(data="task:open:0", message=message, answer=AsyncMock())
+        with patch.object(bot, "store", fake_store, create=True):
+            asyncio.run(bot.task(query))
+        fake_store.toggle_homework_done.assert_not_awaited()
+        self.assertIn("выключен", message.answer.call_args.args[0])
+
+    def test_disabled_planner_omits_dashboard_progress(self):
+        fake_client = SimpleNamespace(get_schedule=lambda _: LOCALIZED_SCHEDULE,
+                                      session=SimpleNamespace(close=lambda: None))
+        fake_store = SimpleNamespace(user=lambda _: {"prefs": {"planner": False}},
+                                     homework_done=lambda *_: self.fail("disabled planner read checklist"))
+        with patch.object(bot, "store", fake_store, create=True), \
+             patch.object(bot, "new_client", return_value=fake_client):
+            screen = bot.fetch(7, "dashboard")
+        self.assertNotIn("▰", screen)
 
 
 class AutomationTest(unittest.TestCase):
@@ -191,6 +229,14 @@ class AttachmentTest(unittest.TestCase):
 
 
 class StoreTest(unittest.TestCase):
+    def test_existing_user_gets_planner_preference_and_can_disable_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = BotStore(str(Path(tmp) / "neo.sqlite3"), Fernet.generate_key().decode())
+            store.save_user(7, "student", "password", {})
+            self.assertTrue(store.user(7)["prefs"]["planner"])
+            store.set_pref(7, "planner", False)
+            self.assertFalse(store.user(7)["prefs"]["planner"])
+
     def test_homework_checklist_is_encrypted_and_toggles(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "neo.sqlite3"

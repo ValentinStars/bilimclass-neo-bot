@@ -43,20 +43,26 @@ class Login(StatesGroup):
 
 def buttons(*rows):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=label, callback_data=action) for label, action in row]
+        [InlineKeyboardButton(text=item[0], callback_data=item[1], style=item[2] if len(item) > 2 else None)
+         for item in row]
         for row in rows
     ])
 
 
-def home_keyboard():
-    return buttons(
-        [("📅 Сегодня", "view:day:0"), ("🌅 Завтра", "view:day:1")],
+def home_keyboard(prefs=None):
+    planner = (prefs or {}).get("planner", True)
+    rows = [
+        [("📅 Сегодня", "view:day:0", "primary"), ("🌅 Завтра", "view:day:1")],
         [("🗓 Неделя", "view:week:0"), ("🔔 Звонки", "view:bells:0")],
         [("📝 ДЗ сегодня", "view:homework:0"), ("📊 Оценки", "view:marks")],
         [("📈 Табель", "view:grades"), ("🏃 Посещаемость", "view:attendance")],
-        [("✅ План ДЗ", "task:open:0"), ("💡 Советы", "view:advice")],
-        [("⚙️ Настройки", "view:settings")],
-    )
+    ]
+    if planner:
+        rows.append([("✅ План ДЗ", "task:open:0", "success"), ("💡 Советы", "view:advice")])
+        rows.append([("⚙️ Настройки", "view:settings")])
+    else:
+        rows.append([("💡 Советы", "view:advice"), ("⚙️ Настройки", "view:settings")])
+    return buttons(*rows)
 
 
 def back_keyboard():
@@ -76,7 +82,7 @@ async def present(call: CallbackQuery, content: str, markup):
             raise
 
 
-def date_keyboard(mode, offset):
+def date_keyboard(mode, offset, prefs=None):
     week_offset = (datetime.now(TZ).date().weekday() + offset) // 7
     modes = (("day", "Уроки"), ("bells", "Звонки"), ("homework", "ДЗ"))
     move = []
@@ -84,9 +90,14 @@ def date_keyboard(mode, offset):
         move.append(("← День", f"view:{mode}:{offset-1}"))
     if offset < MAX_DAY_OFFSET:
         move.append(("День →", f"view:{mode}:{offset+1}"))
-    rows = [[(f"{'• ' if mode == key else ''}{label}", f"view:{key}:{offset}") for key, label in modes]]
+    rows = [[(f"{'• ' if mode == key else ''}{label}", f"view:{key}:{offset}",
+              "primary" if mode == key else None) for key, label in modes]]
     if mode == "homework":
-        rows.append([("✅ План ДЗ", f"task:open:{offset}"), ("📎 Файлы", f"files:list:{offset}")])
+        actions = []
+        if (prefs or {}).get("planner", True):
+            actions.append(("✅ План ДЗ", f"task:open:{offset}", "success"))
+        actions.append(("📎 Файлы", f"files:list:{offset}"))
+        rows.append(actions)
     rows.extend((move, [("🏠 Меню", "view:home"), ("🗓 Неделя", f"view:week:{week_offset}")]))
     return buttons(*rows)
 
@@ -116,7 +127,9 @@ def settings_keyboard(prefs):
              ("morning", "Утренний план"), ("bell_reminders", "Перед уроком"),
              ("weekly", "План недели")]
     rows = [[(f"{'✅' if prefs[key] else '⬜'} {name}", f"toggle:{key}")] for key, name in names]
-    rows += [[("🌙 Тихие часы", "view:quiet")], [("🔐 Профиль", "view:profile"), ("🏠 Меню", "view:home")]]
+    rows += [[(f"{'✅' if prefs['planner'] else '⬜'} План ДЗ", "toggle:planner")],
+             [("🌙 Тихие часы", "view:quiet")],
+             [("🔐 Профиль", "view:profile"), ("🏠 Меню", "view:home")]]
     return buttons(*rows)
 
 
@@ -148,9 +161,11 @@ def fetch(chat_id, kind, offset=0, year=None):
             monday = target - timedelta(days=target.weekday())
             schedule = client.get_schedule(monday.strftime("%d.%m.%Y"))
             if kind == "dashboard":
-                tasks = tasks_for_day(schedule, today)
-                done = store.homework_done(chat_id, today.isoformat())
-                return dashboard_view(schedule, today, now, task_progress(tasks, done))
+                if user["prefs"]["planner"]:
+                    tasks = tasks_for_day(schedule, today)
+                    done = store.homework_done(chat_id, today.isoformat())
+                    return dashboard_view(schedule, today, now, task_progress(tasks, done))
+                return dashboard_view(schedule, today, now)
             if kind == "week":
                 return week_view(schedule, monday)
             if kind == "advice":
@@ -184,7 +199,8 @@ def homework_plan(chat_id, offset):
 
 def plan_keyboard(tasks, done, offset, target):
     rows = [[(f"{'✅' if task['key'] in done else '○'} {task['lesson'].get('label') or 'Урок'}"[:60],
-              f"task:toggle:{offset}:{task['index']}:{target:%Y%m%d}:{task['key']}")] for task in tasks[:30]]
+              f"task:toggle:{offset}:{task['index']}:{target:%Y%m%d}:{task['key']}",
+              None if task["key"] in done else "success")] for task in tasks[:30]]
     navigation = ([("← День", f"task:open:{offset-1}")] if offset > -MAX_DAY_OFFSET else []) + \
                  ([("День →", f"task:open:{offset+1}")] if offset < MAX_DAY_OFFSET else [])
     rows.extend((navigation, [("📝 Откры ДЗ", f"view:homework:{offset}"), ("🏠 Меню", "view:home")]))
@@ -194,7 +210,13 @@ def plan_keyboard(tasks, done, offset, target):
 @router.callback_query(F.data.startswith("task:"))
 async def task(call: CallbackQuery):
     await call.answer()
-    if call.message.chat.type != "private" or not store.user(call.message.chat.id):
+    if call.message.chat.type != "private":
+        return
+    user = store.user(call.message.chat.id)
+    if not user:
+        return
+    if not user["prefs"]["planner"]:
+        await call.message.answer("План ДЗ выключен. Его можно включить в настройках.", reply_markup=buttons([("⚙️ Настройки", "view:settings")]), protect_content=True)
         return
     try:
         parts = call.data.split(":")
@@ -354,7 +376,7 @@ async def start(message: Message, state: FSMContext):
             content = await asyncio.to_thread(fetch, message.chat.id, "dashboard")
         except Exception:
             content = "<b>НЭО · твой школьный день</b>\nРасписание пока не загрузилось. Разделы доступны ниже."
-        await message.answer(content, reply_markup=home_keyboard(), protect_content=True)
+        await message.answer(content, reply_markup=home_keyboard(user["prefs"]), protect_content=True)
     else:
         await message.answer("<b>Привет, я НЭО.</b>\nСоберу расписание, задания и оценки в одном месте и вовремя напомню о важном.\n\nПодключи дневник в личном чате:", reply_markup=buttons([("🔐 Подключить дневник", "auth:start")]), protect_content=True)
 
@@ -428,7 +450,7 @@ async def toggle(call: CallbackQuery):
         await call.answer("Сначала подключи дневник", show_alert=True)
         return
     key = call.data.split(":", 1)[1]
-    if key not in ("marks", "homework", "schedule", "attendance", "morning", "bell_reminders", "weekly"):
+    if key not in ("marks", "homework", "schedule", "attendance", "morning", "bell_reminders", "weekly", "planner"):
         await call.answer()
         return
     store.set_pref(call.message.chat.id, key, not user["prefs"][key])
@@ -475,11 +497,11 @@ async def view(call: CallbackQuery):
             content = await asyncio.to_thread(fetch, call.message.chat.id, "dashboard")
         except Exception:
             content = "<b>НЭО · меню</b>\nРасписание пока не загрузилось. Выбери нужный раздел."
-        await present(call, content, home_keyboard())
+        await present(call, content, home_keyboard(user["prefs"]))
         return
     if kind == "settings":
         p = user["prefs"]
-        await present(call, f"<b>Уведомления</b>\nНажми на пункт, чтобы переключить.\n🌙 Тихие часы: {p['quiet_from']:02d}:00–{p['quiet_to']:02d}:00", settings_keyboard(p))
+        await present(call, f"<b>⚙️ Настройки</b>\nВыбери уведомления и нужные разделы.\n🌙 Тихие часы: {p['quiet_from']:02d}:00–{p['quiet_to']:02d}:00", settings_keyboard(p))
         return
     if kind == "quiet":
         await present(call, "<b>Тихие часы</b>\nВыбери удобный режим по времени Алматы.", quiet_keyboard())
@@ -509,7 +531,7 @@ async def view(call: CallbackQuery):
         await call.message.answer("Дневник временно недоступен. Попробуй чуть позже. Если пароль изменился — /logout и подключи дневник снова.", reply_markup=back_keyboard())
         return
     if kind in ("day", "bells", "homework"):
-        markup = date_keyboard(kind, offset)
+        markup = date_keyboard(kind, offset, user["prefs"])
     elif kind == "week":
         markup = week_keyboard(week_offset)
     elif kind == "grades":
@@ -610,7 +632,7 @@ async def notifications(bot: Bot, interval: int):
                         key = f"bell:{now.date()}:{number}"
                         store.enqueue(chat_id, key, f"<b>Скоро урок · {number:02d}</b>\n{h(lesson.get('label') or 'Урок')} в {start:%H:%M} · каб. {h(lesson.get('cabinet'))}")
                 for item_id, notice in store.pending(chat_id):
-                    await bot.send_message(chat_id, notice, protect_content=True, reply_markup=home_keyboard())
+                    await bot.send_message(chat_id, notice, protect_content=True, reply_markup=home_keyboard(user["prefs"]))
                     store.mark_sent(item_id)
             except Exception:
                 logger.exception("Notification delivery failed for chat %s", chat_id)

@@ -17,6 +17,7 @@ DEFAULT_PREFS = {
     "morning": False,
     "bell_reminders": False,
     "weekly": False,
+    "planner": True,
     "quiet_from": 22,
     "quiet_to": 7,
 }

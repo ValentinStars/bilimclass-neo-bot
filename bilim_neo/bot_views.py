@@ -142,7 +142,9 @@ def schedule_view(schedule, target: date, mode="lessons"):
         for item in homework:
             lines.extend(("", f"<b>{h(item.get('label') or 'Урок')}</b>"))
             if item.get("homeworkBody"):
-                lines.append(h(item["homeworkBody"])[:900])
+                body = str(item["homeworkBody"])
+                shown = h(body[:800])
+                lines.append(f"<blockquote expandable>{shown}</blockquote>" if len(body) > 240 else shown)
             if item.get("hasFiles"):
                 lines.append("📎 К заданию прикреплён файл в BilimClass")
             if item.get("homeworkBooks") and not item.get("homeworkBody"):
@@ -206,7 +208,12 @@ def dashboard_view(schedule, target: date, now: datetime, progress=None):
     if upcoming:
         item, slot = upcoming
         wait = minutes(slot[0]) - now_minute
-        when = f"через {wait} мин" if wait <= 60 else f"в {slot[0]}"
+        if wait <= 60 and now.tzinfo is not None:
+            hour, minute = map(int, slot[0].split(":"))
+            start = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            when = f'<tg-time unix="{int(start.timestamp())}" format="r">через {wait} мин</tg-time>'
+        else:
+            when = f"через {wait} мин" if wait <= 60 else f"в {slot[0]}"
         lines.append(f"Дальше · <b>{h(item.get('label') or 'Урок')}</b> {when}")
     elif not current:
         lines.append("Уроки на сегодня закончились.")
