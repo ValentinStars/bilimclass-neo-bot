@@ -109,38 +109,39 @@ def back_keyboard(prefs=None):
     return buttons([("← Главное меню", "view:home")], prefs=prefs)
 
 
-async def send_screen(message, content, markup, prefs=None, section="home", animate=False):
+async def send_screen(message, content, markup, prefs=None, section="home", animate=False, visual=None):
     prefs = prefs or {}
-    if prefs.get("theme") != "board":
+    if prefs.get("theme") != "board" or section not in visuals.VISUAL_SECTIONS:
         return await message.answer(content, reply_markup=markup, protect_content=True)
-    long = len(content) > 1000
-    caption = "Подробности ниже ↓" if long else content
-    keyboard = None if long else markup
+    if visual is None and len(content) > 1000:
+        return await message.answer(content, reply_markup=markup, protect_content=True)
+    caption = ("Последние оценки. Полный список — кнопкой ниже." if visual.get("rows") else content) if visual is not None else content
+    image_args = (section, content, visual.get("rows"), visual.get("period")) if visual else (section, content)
     if animate and prefs.get("animations", True):
-        await message.answer_animation(BufferedInputFile(await asyncio.to_thread(visuals.welcome_animation), filename="neo.gif"), caption=caption, reply_markup=keyboard, protect_content=True)
+        await message.answer_animation(BufferedInputFile(await asyncio.to_thread(visuals.welcome_animation), filename="neo.gif"), caption=caption, reply_markup=markup, protect_content=True)
     else:
-        await message.answer_photo(BufferedInputFile(await asyncio.to_thread(visuals.card_bytes, section, content), filename="neo-panel.png"), caption=caption, reply_markup=keyboard, protect_content=True)
-    if long:
-        return await message.answer(content, reply_markup=markup, protect_content=True)
+        await message.answer_photo(BufferedInputFile(await asyncio.to_thread(visuals.card_bytes, *image_args), filename="neo-panel.png"), caption=caption, reply_markup=markup, protect_content=True)
 
 
-async def present(call: CallbackQuery, content: str, markup):
+async def present(call: CallbackQuery, content: str, markup, visual=None, force_text=False):
     """Reuse the current panel; keep delivered alerts as a readable history."""
     current_store = globals().get("store")
     chat_id = getattr(getattr(call.message, "chat", None), "id", None)
     user = current_store.user(chat_id) if current_store and chat_id else None
     prefs = user["prefs"] if user else {}
     section = visuals.section_for(getattr(call, "data", None))
-    if prefs.get("theme") == "board":
-        if getattr(call.message, "photo", None) and len(content) <= 1000:
-            media = InputMediaPhoto(media=BufferedInputFile(await asyncio.to_thread(visuals.card_bytes, section, content), filename="neo-panel.png"), caption=content)
+    if prefs.get("theme") == "board" and section in visuals.VISUAL_SECTIONS and not force_text:
+        if getattr(call.message, "photo", None) and (len(content) <= 1000 or visual is not None):
+            caption = ("Последние оценки. Полный список — кнопкой ниже." if visual.get("rows") else content) if visual is not None else content
+            image_args = (section, content, visual.get("rows"), visual.get("period")) if visual else (section, content)
+            media = InputMediaPhoto(media=BufferedInputFile(await asyncio.to_thread(visuals.card_bytes, *image_args), filename="neo-panel.png"), caption=caption)
             try:
                 await call.message.edit_media(media, reply_markup=markup)
             except TelegramBadRequest as exc:
                 if "message is not modified" not in str(exc).lower():
                     raise
             return
-        return await send_screen(call.message, content, markup, prefs, section)
+        return await send_screen(call.message, content, markup, prefs, section, visual=visual)
     if call.message.text is None:
         await call.message.answer(content, reply_markup=markup, protect_content=True)
         return
@@ -250,7 +251,7 @@ def current_period(client):
     return int(past[-1]["period"]) if past else 1
 
 
-def fetch(chat_id, kind, offset=0, year=None):
+def fetch(chat_id, kind, offset=0, year=None, with_visual=False):
     user = store.user(chat_id)
     client = new_client(user)
     try:
@@ -279,7 +280,9 @@ def fetch(chat_id, kind, offset=0, year=None):
             return schedule_view(schedule, target, {"day": "lessons"}.get(kind, kind))
         if kind == "marks":
             period = current_period(client)
-            return marks_view(client.get_current_marks(period), period)
+            marks = client.get_current_marks(period)
+            content = marks_view(marks, period)
+            return (content, {"rows": visuals.grade_rows(marks), "period": period}) if with_visual else content
         if kind == "grades":
             y = year or client.current_edu_year
             return grades_view(client.get_year_grades(y), y)
@@ -380,14 +383,14 @@ async def marks_detail(call: CallbackQuery):
                     for index, name in enumerate(names[:40])]
             rows.append([("← Все оценки", "view:marks")])
             content = "<b>📚 Оценки по предметам</b>\nВыбери предмет." if names else "<b>📚 Оценки по предметам</b>\nПока оценок нет."
-            await present(call, content, buttons(*rows, prefs=user["prefs"]))
+            await present(call, content, buttons(*rows, prefs=user["prefs"]), force_text=True)
         elif parts[1] == "subject":
             index = int(parts[2])
             content = await asyncio.to_thread(subject_marks, call.message.chat.id, index, parts[3] if len(parts) == 4 else None)
             if content is None:
                 await call.message.answer("Список предметов изменился. Открой его заново.", reply_markup=buttons([("← Предметы", "marks:subjects")], prefs=user["prefs"]), protect_content=True)
                 return
-            await present(call, content, buttons([("← Предметы", "marks:subjects"), ("🏠 Меню", "view:home")], prefs=user["prefs"]))
+            await present(call, content, buttons([("← Предметы", "marks:subjects"), ("🏠 Меню", "view:home")], prefs=user["prefs"]), force_text=True)
     except Exception:
         logger.exception("Subject marks failed for chat %s", call.message.chat.id)
         await call.message.answer("Оценки пока недоступны. Попробуй позже.", reply_markup=back_keyboard(user["prefs"]), protect_content=True)
@@ -497,7 +500,7 @@ async def start(message: Message, state: FSMContext):
             except Exception:
                 content = "<b>НЭО · твой школьный день</b>\nРасписание пока не загрузилось. Разделы доступны ниже."
         content = f"<b>Привет, {h(message.from_user.first_name or 'друг')}! Как учёба?</b>\n\n" + content
-        await send_screen(message, content, home_keyboard(user["prefs"]), user["prefs"], animate=True)
+        await send_screen(message, content, home_keyboard(user["prefs"]), user["prefs"])
     else:
         from .experience import onboarding
         await onboarding(message)
@@ -676,6 +679,14 @@ async def view(call: CallbackQuery):
         return
     parts = call.data.split(":")
     kind = parts[1]
+    if kind == "marks" and len(parts) == 3 and parts[2] == "text":
+        try:
+            content = await asyncio.to_thread(fetch, call.message.chat.id, "marks")
+        except Exception:
+            await call.message.answer("Оценки пока недоступны. Попробуй позже.", reply_markup=back_keyboard(user["prefs"]), protect_content=True)
+            return
+        await present(call, content, buttons([("← Оценки", "view:marks"), ("🏠 Меню", "view:home")], prefs=user["prefs"]), force_text=True)
+        return
     if kind == "home":
         store.record_activity(call.from_user.id, "menu")
         if user["profile"].get("account_kind") == "local_admin":
@@ -729,7 +740,9 @@ async def view(call: CallbackQuery):
             if year not in available:
                 await call.message.answer("Этот учебный год недоступен в профиле.", reply_markup=back_keyboard(user["prefs"]))
                 return
-        content = await asyncio.to_thread(fetch, call.message.chat.id, kind, offset, year)
+        payload = await asyncio.to_thread(fetch, call.message.chat.id, kind, offset, year,
+                                          user["prefs"].get("theme") == "board" and kind == "marks")
+        content, visual = payload if isinstance(payload, tuple) else (payload, None)
     except Exception:
         logger.exception("BilimClass view failed for chat %s", call.message.chat.id)
         await call.message.answer("Дневник временно недоступен. Попробуй чуть позже. Если пароль изменился — /logout и подключи дневник снова.", reply_markup=back_keyboard(user["prefs"]))
@@ -744,10 +757,14 @@ async def view(call: CallbackQuery):
         rows = [[(f"{y}/{y+1}", f"view:grades:{y}") for y in years[i:i+2]] for i in range(0, len(years), 2)]
         markup = buttons(*rows, [("← Меню", "view:home")], prefs=user["prefs"])
     elif kind == "marks":
-        markup = buttons([("📚 По предметам", "marks:subjects")], [("🏠 Меню", "view:home")], prefs=user["prefs"])
+        rows = [[("📚 По предметам", "marks:subjects")]]
+        if visual is not None:
+            rows.append([("📋 Все оценки", "view:marks:text")])
+        rows.append([("🏠 Меню", "view:home")])
+        markup = buttons(*rows, prefs=user["prefs"])
     else:
         markup = back_keyboard(user["prefs"])
-    await present(call, content, markup)
+    await present(call, content, markup, visual=visual)
 
 
 def collect_updates(chat_id):

@@ -6,7 +6,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from cryptography.fernet import Fernet
 from PIL import Image
@@ -98,15 +98,45 @@ class ExperienceTest(unittest.TestCase):
         message = SimpleNamespace(answer=AsyncMock(), answer_photo=AsyncMock(), answer_animation=AsyncMock())
         content = "<b>Homework</b>\n" + "Full content " * 120
         asyncio.run(bot.send_screen(message, content, None, {"theme": "board"}, "homework"))
-        message.answer_photo.assert_awaited_once()
+        message.answer_photo.assert_not_awaited()
         self.assertEqual(message.answer.call_args.args[0], content)
         message.answer_photo.reset_mock()
         asyncio.run(bot.send_screen(message, "plain", None, {"theme": "compact"}))
         message.answer_photo.assert_not_awaited()
         png = visuals.card_bytes("day", "Example")
-        self.assertEqual(Image.open(io.BytesIO(png)).size, (1200, 680))
+        self.assertEqual(Image.open(io.BytesIO(png)).size, (960, 160))
         gif = Image.open(io.BytesIO(visuals.welcome_animation()))
         self.assertGreater(gif.n_frames, 1)
+
+    def test_compact_grade_table_uses_real_subject_scores_and_thresholds(self):
+        source = [
+            {"subject": "Каз. язык", "date": "29.09", "regular_mark": 3, "regular_max": 10},
+            {"subject": "История", "date": "29.09", "sor_mark": 12, "sor_max": 15},
+            {"subject": "Каз. язык", "date": "30.09", "regular_mark": 10, "regular_max": 10},
+        ]
+        rows = visuals.grade_rows(source)
+        kaz = next(row for row in rows if row["subject"] == "Каз. язык")
+        self.assertEqual([(mark["type"], mark["score"], mark["max"]) for mark in kaz["marks"]],
+                         [("ФО", "10", 10), ("ФО", "3", 10)])
+        self.assertEqual(visuals.grade_color(10, 10), visuals.GREEN)
+        self.assertEqual(visuals.grade_color(3, 10), visuals.RED)
+        self.assertEqual(visuals.grade_color(7, 10), visuals.YELLOW)
+        self.assertEqual(visuals.grade_color(3, None), visuals.MUTED)
+        image = visuals.grade_card(rows, 1)
+        self.assertEqual(image.width, 960)
+        self.assertLess(image.height, 400)
+        self.assertTrue(visuals.card_bytes("marks", "ignored", rows, 1).startswith(b"\x89PNG"))
+
+    def test_marks_visual_fetch_reuses_the_same_diary_request(self):
+        self.store.save_user(11, "student", "password", {})
+        marks = [{"subject": "Каз. язык", "date": "30.09", "regular_mark": 10, "regular_max": 10}]
+        client = SimpleNamespace(session=SimpleNamespace(close=lambda: None), get_profile=lambda: {},
+                                 get_current_marks=Mock(return_value=marks))
+        with patch.object(bot, "new_client", return_value=client), patch.object(bot, "current_period", return_value=1):
+            text, visual = bot.fetch(11, "marks", with_visual=True)
+        self.assertIn("Каз. язык", text)
+        self.assertEqual(visual["rows"][0]["subject"], "Каз. язык")
+        self.assertEqual(client.get_current_marks.call_count, 1)
 
     def test_dispatcher_onboarding_recovery_and_feedback_roundtrip(self):
         class FakeTelegram(BaseSession):

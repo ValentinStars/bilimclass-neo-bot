@@ -1,9 +1,11 @@
-# НЭО / Табло
+# НЭО / компактное табло
 
-The visual mode uses a school timetable board: charcoal `#151916`, warm white `#f2f0e5`, lime `#d4f66a`, muted text `#9ca69b`. Every section has a clear title and a small index, with a restrained grid at the right edge. Avoid gradients, ornamental glass panels and marketing paragraphs.
+В режиме «Табло» обычные разделы используют небольшие карточки PNG шириной 960 px и высотой по содержимому. Палитра: графит `#151916`, тёплый белый `#f2f0e5`, лаймовый акцент `#d4f66a`. Без градиентов, сеток и декоративных крупных цифр. Длинные страницы (больше 1000 символов) отправляются текстом с теми же кнопками. Режим «Компактный» всегда использует текст.
 
-`visuals.py` draws a 1200×680 PNG with DejaVu Sans, a large heading and at most five summary lines. Pillow binary-searches line truncation so unusually long homework cannot cause quadratic font measurement. The image is a summary, not the sole source of information. `send_screen()` retains complete HTML as caption where it fits and sends a separate text message when it exceeds 1,000 characters. The keyboard stays with that text. Photo-to-photo navigation edits media in place; switching to compact or coming from a GIF sends a new text panel.
+Карточка расписания показывает до шести уроков или дней: по одному на строку, без имён учителей и длинных пояснений. Полный текст остаётся в подписи, если он помещается в лимит Telegram. Для длинного ДЗ бот отправляет текст вместо изображения. Кнопки навигации остаются рядом с данными.
 
-Animation is a 1.8-second moving underline in the opening screen, cached once in memory without personal data. Normal navigation uses static cards. Users can disable motion before login or from settings. The compact mode avoids media entirely after onboarding. Existing users are not switched automatically.
+Оценки — отдельная компактная таблица: предмет и дата слева, до двух последних отметок этого предмета справа. Типы — ФО, СОР, СОЧ, ПО. Балл показывается вместе с максимумом, если BilimClass его вернул. Цвет считается от доли балла: зелёный от 80%, жёлтый от 60%, красный ниже 60%. Если максимума нет, фон нейтральный: бот не угадывает шкалу. Таблица ограничена шестью предметами; «Все оценки» открывает полную текстовую историю, «По предметам» — историю одного предмета с комментариями. Данные для текста и таблицы берутся из одного запроса к дневнику.
 
-Fonts must be installed at `/usr/share/fonts/truetype/dejavu/`; the Dockerfile installs `fonts-dejavu-core`. Static demonstration artwork can be committed, but personalized cards, credentials, real screenshots and feedback never belong in assets. Admin charts use the same palette. Test long content, Cyrillic, no-data states and back navigation from photos/GIFs before changing delivery.
+При обычном `/start` используется статичная карточка. Короткая GIF-анимация доступна только в примере оформления перед входом, если пользователь разрешил анимацию. Персональные изображения создаются в памяти и не записываются на диск. `assets/ui-preview.png` содержит лишь выдуманные оценки для показа дизайна.
+
+Шрифты DejaVu находятся в `/usr/share/fonts/truetype/dejavu/`; Dockerfile устанавливает `fonts-dejavu-core`. Перед изменением доставки проверяйте кириллицу, пустые данные, длинный текст, возврат из фотографии и отсутствие лишнего запроса BilimClass.
