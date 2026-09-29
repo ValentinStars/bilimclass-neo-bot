@@ -15,6 +15,8 @@ Read this first, then `docs/NEO.md` for the autonomous roadmap and `docs/ARCHITE
 - `bilim_neo/bot_views.py`: pure rendering. Escape all external text with `h()` and keep Telegram messages under 4096 characters.
 - `bilim_neo/automation.py`: pure scheduling logic. Use aware `Asia/Almaty` datetimes.
 - `bilim_neo/bot_store.py`: encrypted SQLite state and outbox. Evolve schema with migrations before changing stored shapes on a deployed bot.
+- `bilim_neo/admin_panel.py` and `admin_tools.py`: allowlisted admin UI, audience matching, read-only metrics, in-memory exports and PNGs. Check `ADMIN_IDS` **and** `prefs.admin_enabled` at every entry; broadcasts require preview and confirmation. Never log or cache a credential export.
+- `bilim_neo/lord_bonus.py`: public Google Sheet discovery and A7 read. The student's class must come from BilimClass profile; reject non-LORD schools and never accept arbitrary gids from callbacks. Admin global switch is `app_settings.lord_bonus_enabled`.
 - Run: `pip install -e .`, `python -m bilim_neo`; verify: `python -m unittest discover -s tests -v` and `python -m compileall -q bilim_neo`.
 - Runtime: `manage.sh` and `configure.sh` provide interactive setup without echoing the token. `start.sh`, `stop.sh`, `restart.sh`, `status.sh`, `logs.sh` manage a local daemon or an installed user systemd service. `scripts/deploy.sh` copies code without secrets. `scripts/apply_brand.py` uploads the committed JPG avatar.
 
@@ -30,6 +32,8 @@ Read this first, then `docs/NEO.md` for the autonomous roadmap and `docs/ARCHITE
 8. Keep homework completion separate from BilimClass data: the checklist is a local planning aid, not a submission to the school. Do not label a task submitted or completed in BilimClass when it is merely checked locally.
 9. `prefs.planner` is a view preference, separate from `prefs.homework` notifications. When off, hide planner entry points and dashboard progress, reject old `task:` callbacks, and keep encrypted completion state so re-enabling restores it. The UI uses Bot API button `style`, `tg-time`, and expandable blockquotes; keep plain text fallbacks and tests.
 10. `prefs.button_colors` defaults on and controls *every* keyboard for that student. Route new inline buttons through `buttons(..., prefs=user["prefs"])` or a keyboard helper that accepts prefs; keep a single semantic style mapping in `action_style()` and verify color-off removes all styles, including explicit ones. Existing sent messages retain their old markup until navigated or edited.
+11. Referral links are HMAC signed. Credit only a first authenticated registration; pending visits alone do not count. Do not reveal credentials, Telegram ID or diary content in inviter notices.
+12. The admin export of `login,password,class` is deliberately sensitive. Keep it restricted to configured IDs, require in-panel confirmation, construct it only in memory, and send only to the owner's private chat. Never exercise this export in live testing. Test with fake credentials.
 
 ## Definition of done for a feature
 

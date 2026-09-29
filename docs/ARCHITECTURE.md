@@ -28,6 +28,16 @@ Homework and schedule snapshots carry `schema: 2`. The older snapshot format was
 
 `POLL_INTERVAL_SECONDS` defaults to 1800 with a hard minimum of 300. At one login and several API calls per user per interval, SQLite and sequential checks are suitable for a small private deployment. Before large-scale use, introduce bounded concurrency, backoff and per-school rate limiting, a proper migration tool, health metrics, and an explicit retention policy. An API field can be null or absent; renderers must handle both.
 
+## Referrals, admin and BONUS LORD
+
+`bot.py` signs each referral deep-link payload with an HMAC derived from `BOT_ENCRYPTION_KEY`. `pending_referrals` records an unauthenticated visitor; `referrals` is inserted only after the first successful credential check. The same transaction queues a one-time notice to the inviter. No reward or credential data goes to the inviter.
+
+`ADMIN_IDS` is the deployment allowlist, configured interactively and stored only in `.env`. The `admin_enabled` preference must also be on. `admin_panel.py` checks both for every command, callback and announcement draft. The credential CSV is assembled in memory only after explicit confirmation and sent to the admin's private chat with Telegram content protection. Do not log it, stage it, or write it to the project directory. A live operator should still treat downloaded copies as sensitive. Reports and PNG charts are generated from the encrypted store after decryption in memory; the activity table keeps 90 days of event type and user ID, without diary content. A logout cascades this history away.
+
+Announcements select recipients from stored profile metadata. The admin sees a preview and must confirm; `copy_message` lets Telegram copy supported text/media without local downloads. The city matcher accepts only explicit `город …` or `г. …` fields. It does not infer a city from an oblast or school name. Each completed campaign stores recipient/success/failure counts, not content.
+
+`lord_bonus.py` reads public Google Sheets HTML to discover exact class tabs, then requests `A7` as CSV through the public `gviz/tq` endpoint. The page structure may change; parser failure yields a temporary-unavailable view, not another class's value. Only a BilimClass profile whose school name contains the standalone word `ЛОРД` can access the view, and the global `lord_bonus_enabled` switch lets an admin hide it. Never accept a client-supplied gid or class in the student callback.
+
 ## UX rules
 
 The interface is a compact school notebook: one message per useful answer, bold section title, time and subject first, supporting details below. The home keyboard groups day, week/bells, homework/marks, report/attendance, plan/advice and settings. Details have a back action. Empty days, missing marks, authentication errors and upstream downtime use direct language. Do not disclose student identifiers such as IIN in the chat.

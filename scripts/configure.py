@@ -38,7 +38,7 @@ def valid_key(value):
 
 def save_config(path, values):
     content = "".join(f"{key}={values[key]}\n" for key in (
-        "TELEGRAM_BOT_TOKEN", "BOT_ENCRYPTION_KEY", "BOT_DB_PATH", "POLL_INTERVAL_SECONDS"
+        "TELEGRAM_BOT_TOKEN", "BOT_ENCRYPTION_KEY", "BOT_DB_PATH", "POLL_INTERVAL_SECONDS", "ADMIN_IDS"
     ))
     with tempfile.NamedTemporaryFile("w", dir=path.parent, prefix=".env.", delete=False) as handle:
         temporary = Path(handle.name)
@@ -90,11 +90,19 @@ def main():
             pass
         print("Введите число от 5 до 1440 минут.")
 
+    while True:
+        admin_default = existing.get("ADMIN_IDS", "")
+        admin_ids = input(f"Telegram ID администраторов через запятую [{admin_default or 'не задано'}]: ").strip() or admin_default
+        if not admin_ids or re.fullmatch(r"\d+(?:\s*,\s*\d+)*", admin_ids):
+            break
+        print("Укажите числовые Telegram ID через запятую.")
+
     save_config(CONFIG, {
         "TELEGRAM_BOT_TOKEN": token,
         "BOT_ENCRYPTION_KEY": key,
         "BOT_DB_PATH": raw_path,
         "POLL_INTERVAL_SECONDS": str(minutes * 60),
+        "ADMIN_IDS": admin_ids,
     })
     print("Настройки сохранены в .env (доступ только владельцу файла).")
     print("Если бот уже запущен, примените настройки командой ./restart.sh")

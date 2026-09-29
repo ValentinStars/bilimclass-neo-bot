@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -26,6 +27,8 @@ from .bot_views import (advice_view, attendance_view, dashboard_view, day,
                         week_view, checklist_view, subject_marks_view)
 from .client import BilimClassClient
 from .planner import tasks_for_day, task_progress
+from .lord_bonus import bonus_for_class, is_lord_school
+from . import admin_tools
 
 
 TZ = ZoneInfo("Asia/Almaty")
@@ -81,6 +84,7 @@ def home_keyboard(prefs=None):
         rows.append([("⚙️ Настройки", "view:settings")])
     else:
         rows.append([("💡 Советы", "view:advice"), ("⚙️ Настройки", "view:settings")])
+    rows.append([("🎟 Пригласить друга", "ref:link")])
     return buttons(*rows, prefs=prefs)
 
 
@@ -90,6 +94,9 @@ def back_keyboard(prefs=None):
 
 async def present(call: CallbackQuery, content: str, markup):
     """Reuse the current panel; keep delivered alerts as a readable history."""
+    if call.message.text is None:
+        await call.message.answer(content, reply_markup=markup, protect_content=True)
+        return
     alert = (call.message.text or "").startswith(("📊 Новые", "🏃 Новые", "📝 Обновилась", "📅 Изменилось", "Доброе утро", "Скоро урок", "План недели"))
     if alert:
         await call.message.answer(content, reply_markup=markup, protect_content=True)
@@ -140,7 +147,7 @@ def week_keyboard(week_offset, prefs=None):
     return buttons(*rows, prefs=prefs)
 
 
-def settings_keyboard(prefs):
+def settings_keyboard(prefs, chat_id=None, profile=None, bonus_visible=True):
     names = [("marks", "Новые оценки"), ("homework", "Новая домашка"),
              ("schedule", "Изменения расписания"), ("attendance", "Пропуски"),
              ("morning", "Утренний план"), ("bell_reminders", "Перед уроком"),
@@ -150,12 +157,35 @@ def settings_keyboard(prefs):
              [(f"{'✅' if prefs['button_colors'] else '⬜'} Цветные кнопки", "toggle:button_colors")],
              [("🌙 Тихие часы", "view:quiet")],
              [("🔐 Профиль", "view:profile"), ("🏠 Меню", "view:home")]]
+    if bonus_visible and profile and is_lord_school(profile.get("schoolName")):
+        rows.insert(-1, [(f"{'✅' if prefs['lord_bonus'] else '⬜'} BONUS LORD", "toggle:lord_bonus"), ("🪙 Открыть", "view:bonus")])
+    if chat_id is not None and admin_tools.allowed(chat_id):
+        rows.insert(-1, [(f"{'✅' if prefs['admin_enabled'] else '⬜'} Админ-панель", "toggle:admin_enabled")])
+        if prefs["admin_enabled"]:
+            rows.insert(-1, [("🛠 Открыть админ-панель", "admin:home")])
     return buttons(*rows, prefs=prefs)
+
+
+def referral_payload(chat_id):
+    identifier = str(chat_id)
+    digest = hmac.new(os.environ["BOT_ENCRYPTION_KEY"].encode(), identifier.encode(), hashlib.sha256).hexdigest()[:16]
+    return f"r_{identifier}_{digest}"
+
+
+def referral_inviter(payload):
+    parts = payload.split("_")
+    if len(parts) != 3 or parts[0] != "r" or not parts[1].isdigit():
+        return None
+    return int(parts[1]) if hmac.compare_digest(referral_payload(int(parts[1])), payload) else None
 
 
 def new_client(user):
     client = BilimClassClient(user["login"], user["password"])
-    client.login()
+    try:
+        client.login()
+    except Exception:
+        client.session.close()
+        raise
     return client
 
 
@@ -174,6 +204,11 @@ def fetch(chat_id, kind, offset=0, year=None):
     user = store.user(chat_id)
     client = new_client(user)
     try:
+        latest = client.get_profile()
+        profile = {key: latest.get(key) for key in ("fio", "group", "schoolName", "schoolAddress", "region", "currentEduYear", "availableEduYears")}
+        if profile != user["profile"]:
+            store.update_profile(chat_id, profile)
+            user["profile"] = profile
         now = datetime.now(TZ)
         today = now.date()
         target = today + timedelta(days=1 if kind == "advice" else offset)
@@ -235,6 +270,7 @@ async def task(call: CallbackQuery):
     user = store.user(call.message.chat.id)
     if not user:
         return
+    store.record_activity(call.from_user.id, "planner")
     if not user["prefs"]["planner"]:
         await call.message.answer("План ДЗ выключен. Его можно включить в настройках.", reply_markup=buttons([("⚙️ Настройки", "view:settings")], prefs=user["prefs"]), protect_content=True)
         return
@@ -285,6 +321,7 @@ async def marks_detail(call: CallbackQuery):
     user = store.user(call.message.chat.id)
     if not user:
         return
+    store.record_activity(call.from_user.id, "marks")
     try:
         parts = call.data.split(":")
         if parts[1] == "subjects":
@@ -342,6 +379,7 @@ async def files(call: CallbackQuery):
     if not user:
         await call.answer("Сначала подключи дневник", show_alert=True)
         return
+    store.record_activity(call.from_user.id, "files")
     offset = 0
     try:
         parts = call.data.split(":")
@@ -394,8 +432,13 @@ async def start(message: Message, state: FSMContext):
     if not private(message):
         return
     await state.clear()
+    if message.text and message.text.startswith("/start "):
+        inviter = referral_inviter(message.text.split(maxsplit=1)[1].strip())
+        if inviter:
+            store.set_pending_referral(message.chat.id, inviter)
     user = store.user(message.chat.id)
     if user:
+        store.record_activity(message.chat.id, "menu")
         try:
             content = await asyncio.to_thread(fetch, message.chat.id, "dashboard")
         except Exception:
@@ -457,30 +500,47 @@ async def auth_password(message: Message, state: FSMContext):
     try:
         def verify():
             client = BilimClassClient(data["username"], password)
-            client.login()
-            return client.get_profile()
+            try:
+                client.login()
+                return client.get_profile()
+            finally:
+                client.session.close()
         profile = await asyncio.to_thread(verify)
     except Exception:
         await message.answer("Не получилось войти. Проверь логин и пароль и попробуй ещё раз через кнопку.", reply_markup=buttons([("Попробовать снова", "auth:start")]), protect_content=True)
         return
-    profile = {key: profile.get(key) for key in ("fio", "group", "schoolName", "currentEduYear", "availableEduYears")}
-    store.save_user(message.chat.id, data["username"], password, profile)
-    await message.answer(f"Готово, <b>{h(profile.get('fio'))}</b>! Дневник подключён.\nУведомления можно настроить отдельно для каждого события.", reply_markup=home_keyboard(), protect_content=True)
+    profile = {key: profile.get(key) for key in ("fio", "group", "schoolName", "schoolAddress", "region", "currentEduYear", "availableEduYears")}
+    is_new = store.save_user(message.chat.id, data["username"], password, profile)
+    store.record_activity(message.chat.id, "login")
+    if is_new:
+        store.complete_referral(message.chat.id, f"<b>🎟 Друг подключился по твоей ссылке</b>\n{h(profile.get('fio'))} · {h(profile.get('group'))}. Спасибо за приглашение!")
+    await message.answer(f"Готово, <b>{h(profile.get('fio'))}</b>! Дневник подключён.\nУведомления можно настроить отдельно для каждого события.", reply_markup=home_keyboard(store.user(message.chat.id)["prefs"]), protect_content=True)
 
 
 @router.callback_query(F.data.startswith("toggle:"))
 async def toggle(call: CallbackQuery):
+    if call.message.chat.type != "private":
+        await call.answer()
+        return
     user = store.user(call.message.chat.id)
     if not user:
         await call.answer("Сначала подключи дневник", show_alert=True)
         return
     key = call.data.split(":", 1)[1]
-    if key not in ("marks", "homework", "schedule", "attendance", "morning", "bell_reminders", "weekly", "planner", "button_colors"):
+    if key == "admin_enabled" and not admin_tools.allowed(call.from_user.id):
+        await call.answer("Доступ закрыт", show_alert=True)
+        return
+    if key == "lord_bonus" and not is_lord_school(user["profile"].get("schoolName")):
+        await call.answer("Доступно только ученикам ЛОРД", show_alert=True)
+        return
+    if key not in ("marks", "homework", "schedule", "attendance", "morning", "bell_reminders", "weekly", "planner", "button_colors", "admin_enabled", "lord_bonus"):
         await call.answer()
         return
     store.set_pref(call.message.chat.id, key, not user["prefs"][key])
+    store.record_activity(call.from_user.id, "settings")
     await call.answer("Настройка сохранена")
-    await call.message.edit_reply_markup(reply_markup=settings_keyboard(store.user(call.message.chat.id)["prefs"]))
+    updated = store.user(call.message.chat.id)
+    await call.message.edit_reply_markup(reply_markup=settings_keyboard(updated["prefs"], call.from_user.id, updated["profile"], store.get_setting("lord_bonus_enabled", True)))
 
 
 @router.callback_query(F.data.startswith("quiet:"))
@@ -506,6 +566,22 @@ def quiet_keyboard(prefs=None):
     return buttons([("22:00–07:00", "quiet:22:7"), ("21:00–08:00", "quiet:21:8")], [("00:00–00:00 · выкл.", "quiet:0:0")], [("← Настройки", "view:settings")], prefs=prefs)
 
 
+@router.callback_query(F.data == "ref:link")
+async def referral_link(call: CallbackQuery):
+    if call.message.chat.type != "private":
+        await call.answer()
+        return
+    user = store.user(call.from_user.id)
+    if not user:
+        await call.answer("Сначала подключи дневник", show_alert=True)
+        return
+    await call.answer()
+    bot_info = await call.bot.get_me()
+    url = f"https://t.me/{bot_info.username}?start={referral_payload(call.from_user.id)}"
+    count = store.referral_count(call.from_user.id)
+    await present(call, f"<b>🎟 Пригласи друга</b>\nОтправь ему ссылку. Когда он подключит дневник, я сообщу тебе здесь.\n\n<code>{h(url)}</code>\n\nПодключились по ссылке: {count}", back_keyboard(user["prefs"]))
+
+
 @router.callback_query(F.data.startswith("view:"))
 async def view(call: CallbackQuery):
     await call.answer()
@@ -518,6 +594,7 @@ async def view(call: CallbackQuery):
     parts = call.data.split(":")
     kind = parts[1]
     if kind == "home":
+        store.record_activity(call.from_user.id, "menu")
         try:
             content = await asyncio.to_thread(fetch, call.message.chat.id, "dashboard")
         except Exception:
@@ -525,8 +602,22 @@ async def view(call: CallbackQuery):
         await present(call, content, home_keyboard(user["prefs"]))
         return
     if kind == "settings":
+        store.record_activity(call.from_user.id, "settings")
         p = user["prefs"]
-        await present(call, f"<b>⚙️ Настройки</b>\nВыбери уведомления и нужные разделы.\n🌙 Тихие часы: {p['quiet_from']:02d}:00–{p['quiet_to']:02d}:00", settings_keyboard(p))
+        await present(call, f"<b>⚙️ Настройки</b>\nВыбери уведомления и нужные разделы.\n🌙 Тихие часы: {p['quiet_from']:02d}:00–{p['quiet_to']:02d}:00", settings_keyboard(p, call.from_user.id, user["profile"], store.get_setting("lord_bonus_enabled", True)))
+        return
+    if kind == "bonus":
+        if not is_lord_school(user["profile"].get("schoolName")) or not store.get_setting("lord_bonus_enabled", True) or not user["prefs"]["lord_bonus"]:
+            await call.message.answer("BONUS LORD недоступен для этого профиля.")
+            return
+        try:
+            group, amount = await asyncio.to_thread(bonus_for_class, user["profile"].get("group"))
+            content = f"<b>🪙 BONUS LORD · {h(group)}</b>\nСумма класса: <b>{amount:g}</b>\nИсточник: публичная таблица класса, ячейка A7." if amount is not None else "<b>BONUS LORD</b>\nДля твоего класса лист пока не найден."
+        except Exception:
+            logger.warning("BONUS LORD unavailable for chat %s", call.from_user.id)
+            content = "<b>BONUS LORD</b>\nТаблица сейчас недоступна. Попробуй позже."
+        store.record_activity(call.from_user.id, "bonus")
+        await present(call, content, back_keyboard(user["prefs"]))
         return
     if kind == "quiet":
         await present(call, "<b>Тихие часы</b>\nВыбери удобный режим по времени Алматы.", quiet_keyboard(user["prefs"]))
@@ -537,6 +628,7 @@ async def view(call: CallbackQuery):
         return
     if kind not in ("day", "bells", "homework", "week", "advice", "marks", "grades", "attendance"):
         return
+    store.record_activity(call.from_user.id, "marks" if kind in ("marks", "grades") else "diary")
     try:
         raw_offset = int(parts[2]) if len(parts) > 2 else 0
         week_offset = max(-MAX_WEEK_OFFSET, min(MAX_WEEK_OFFSET, raw_offset)) if kind == "week" else 0
@@ -649,8 +741,13 @@ async def notifications(bot: Bot, interval: int):
                 if sync_due:
                     try:
                         await asyncio.to_thread(collect_updates, chat_id)
+                    except RuntimeError as exc:
+                        if "авторизации (403)" in str(exc):
+                            store.enqueue(chat_id, "auth:reconnect", "<b>🔐 Дневник требует повторного входа</b>\nBilimClass больше не принимает сохранённые данные. Отправь /logout и подключи дневник снова.")
+                        else:
+                            logger.warning("BilimClass sync temporarily unavailable for chat %s (%s)", chat_id, type(exc).__name__)
                     except Exception:
-                        logger.exception("BilimClass sync failed for chat %s", chat_id)
+                        logger.warning("BilimClass sync temporarily unavailable for chat %s", chat_id)
                 cached = store.snapshot(chat_id, "today_lessons")
                 if user["prefs"]["bell_reminders"] and cached and cached.get("date") == now.date().isoformat():
                     for number, lesson, start in due_bells(cached["lessons"], now):
@@ -682,9 +779,11 @@ async def main():
     bot = Bot(token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
     dp.include_router(router)
+    from .admin_panel import router as admin_router
+    dp.include_router(admin_router)
     await bot.set_my_commands([BotCommand(command=c, description=d) for c, d in (
         ("start", "Открыть дневник"), ("menu", "Главное меню"),
-        ("logout", "Отключить дневник"), ("cancel", "Отменить ввод"))])
+        ("logout", "Отключить дневник"), ("cancel", "Отменить ввод"), ("admin", "Панель администратора"))])
     task = asyncio.create_task(notifications(bot, max(300, int(os.getenv("POLL_INTERVAL_SECONDS", "1800")))))
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())

@@ -85,7 +85,7 @@ class ViewsTest(unittest.TestCase):
         visible = bot.home_keyboard({"planner": True})
         today = visible.inline_keyboard[0][0]
         self.assertEqual(today.style, "primary")
-        self.assertEqual(visible.inline_keyboard[-2][0].style, "success")
+        self.assertEqual(next(b.style for row in visible.inline_keyboard for b in row if b.callback_data == "task:open:0"), "success")
         hidden_day = bot.date_keyboard("homework", 0, {"planner": False})
         self.assertNotIn("task:open:0", [button.callback_data for row in hidden_day.inline_keyboard for button in row])
         self.assertIn("files:list:0", [button.callback_data for row in hidden_day.inline_keyboard for button in row])
@@ -114,14 +114,14 @@ class ViewsTest(unittest.TestCase):
         self.assertIn('format="r"', screen)
 
     def test_callbacks_route_to_the_selected_view(self):
-        fake_store = SimpleNamespace(user=lambda chat_id: {"profile": {"currentEduYear": 2026}, "prefs": {"planner": True}})
+        fake_store = SimpleNamespace(user=lambda chat_id: {"profile": {"currentEduYear": 2026}, "prefs": {"planner": True}}, record_activity=lambda *_: None)
         for callback, expected in (("view:day:0", "day"), ("view:bells:0", "bells"),
                                    ("view:homework:0", "homework"), ("view:week:0", "week")):
             with self.subTest(callback=callback), patch.object(bot, "store", fake_store, create=True), \
                  patch.object(bot.asyncio, "to_thread", new_callable=AsyncMock, return_value="<b>Ответ</b>") as thread, \
                  patch.object(bot, "present", new_callable=AsyncMock) as present:
                 message = SimpleNamespace(chat=SimpleNamespace(id=7, type="private"), answer=AsyncMock())
-                query = SimpleNamespace(data=callback, message=message, answer=AsyncMock())
+                query = SimpleNamespace(data=callback, message=message, from_user=SimpleNamespace(id=7), answer=AsyncMock())
                 asyncio.run(bot.view(query))
                 self.assertEqual(thread.call_args.args[2], expected)
                 self.assertEqual(present.call_args.args[1], "<b>Ответ</b>")
@@ -149,9 +149,9 @@ class ViewsTest(unittest.TestCase):
     def test_stale_checklist_button_does_not_toggle_another_day(self):
         target = date(2026, 9, 28)
         tasks = tasks_for_day(LOCALIZED_SCHEDULE, target)
-        fake_store = SimpleNamespace(user=lambda _: {"login": "student", "prefs": {"planner": True}}, toggle_homework_done=AsyncMock())
+        fake_store = SimpleNamespace(user=lambda _: {"login": "student", "prefs": {"planner": True}}, toggle_homework_done=AsyncMock(), record_activity=lambda *_: None)
         message = SimpleNamespace(chat=SimpleNamespace(id=7, type="private"), answer=AsyncMock())
-        query = SimpleNamespace(data=f"task:toggle:0:0:20260929:{tasks[0]['key']}", message=message, answer=AsyncMock())
+        query = SimpleNamespace(data=f"task:toggle:0:0:20260929:{tasks[0]['key']}", message=message, from_user=SimpleNamespace(id=7), answer=AsyncMock())
         with patch.object(bot, "store", fake_store, create=True), \
              patch.object(bot.asyncio, "to_thread", new_callable=AsyncMock, return_value=(target, tasks)):
             asyncio.run(bot.task(query))
@@ -159,9 +159,9 @@ class ViewsTest(unittest.TestCase):
         self.assertIn("измени", message.answer.call_args.args[0])
 
     def test_disabled_planner_rejects_old_button(self):
-        fake_store = SimpleNamespace(user=lambda _: {"prefs": {"planner": False}}, toggle_homework_done=AsyncMock())
+        fake_store = SimpleNamespace(user=lambda _: {"prefs": {"planner": False}}, toggle_homework_done=AsyncMock(), record_activity=lambda *_: None)
         message = SimpleNamespace(chat=SimpleNamespace(id=7, type="private"), answer=AsyncMock())
-        query = SimpleNamespace(data="task:open:0", message=message, answer=AsyncMock())
+        query = SimpleNamespace(data="task:open:0", message=message, from_user=SimpleNamespace(id=7), answer=AsyncMock())
         with patch.object(bot, "store", fake_store, create=True):
             asyncio.run(bot.task(query))
         fake_store.toggle_homework_done.assert_not_awaited()
@@ -169,8 +169,9 @@ class ViewsTest(unittest.TestCase):
 
     def test_disabled_planner_omits_dashboard_progress(self):
         fake_client = SimpleNamespace(get_schedule=lambda _: LOCALIZED_SCHEDULE,
+                                      get_profile=lambda: {"fio": None, "group": None, "schoolName": None, "schoolAddress": None, "region": None, "currentEduYear": None, "availableEduYears": None},
                                       session=SimpleNamespace(close=lambda: None))
-        fake_store = SimpleNamespace(user=lambda _: {"prefs": {"planner": False}},
+        fake_store = SimpleNamespace(user=lambda _: {"prefs": {"planner": False}, "profile": fake_client.get_profile()},
                                      homework_done=lambda *_: self.fail("disabled planner read checklist"))
         with patch.object(bot, "store", fake_store, create=True), \
              patch.object(bot, "new_client", return_value=fake_client):

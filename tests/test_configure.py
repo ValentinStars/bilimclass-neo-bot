@@ -18,7 +18,7 @@ class ConfigureTest(unittest.TestCase):
             with patch.object(configure, "CONFIG", config), \
                  patch.object(configure.sys, "stdin", SimpleNamespace(isatty=lambda: True)), \
                  patch.object(configure.getpass, "getpass", side_effect=[token, ""]), \
-                 patch("builtins.input", side_effect=["", "", "", ""]), \
+                 patch("builtins.input", side_effect=["", "", "", "", "", ""]), \
                  contextlib.redirect_stdout(io.StringIO()):
                 configure.main()
                 first = configure.read_config(config)

@@ -2,6 +2,8 @@ import uuid
 from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 
 class BilimClassClient:
@@ -16,6 +18,11 @@ class BilimClassClient:
         self.username = login
         self.password = password
         self.session = requests.Session()
+        # BilimClass occasionally returns transient 5xx responses. Retry reads only;
+        # never repeat a login POST whose outcome is unknown.
+        self.session.mount("https://", HTTPAdapter(max_retries=Retry(
+            total=2, backoff_factor=0.5, status_forcelist=[500, 502, 503, 504],
+            allowed_methods=["GET"], raise_on_status=False)))
         self.device_uuid = str(uuid.uuid4())
 
         self.access_token: Optional[str] = None
@@ -118,6 +125,7 @@ class BilimClassClient:
             "bornDate": self.user_info.get("bornDate"),
             "schoolName": school.get("name"),
             "region": school.get("region"),
+            "schoolAddress": school.get("address"),
             "group": group.get("name"),
             "groupId": self.group_id,
             "iin": student_info.get("iin"),
@@ -249,7 +257,7 @@ class BilimClassClient:
         successful_groups = 0
         for guuid in self.group_uuids:
             try:
-                r = requests.get(
+                r = self.session.get(
                     f"{self.JOURNAL_URL}/diary/quarter",
                     headers=headers_journal,
                     params={
