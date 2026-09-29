@@ -9,6 +9,7 @@ Read this first, then `docs/NEO.md` for the autonomous roadmap and `docs/ARCHITE
 ## Files and commands
 
 - `bilim_neo/client.py`: sync BilimClass HTTP client. This is the sole source of API parsing. Anonymize any captured fixture.
+- `bilim_neo/attachments.py`: validate file metadata and stream an attachment directly to Telegram in bounded chunks. Do not persist files or signed links, log signed URLs, or loosen the storage host check without live evidence.
 - `bilim_neo/bot.py`: aiogram 3 router, auth FSM, notification workers. Call sync I/O using `asyncio.to_thread`.
 - `bilim_neo/bot_views.py`: pure rendering. Escape all external text with `h()` and keep Telegram messages under 4096 characters.
 - `bilim_neo/automation.py`: pure scheduling logic. Use aware `Asia/Almaty` datetimes.
@@ -24,6 +25,7 @@ Read this first, then `docs/NEO.md` for the autonomous roadmap and `docs/ARCHITE
 4. Keep quiet hours and each notification preference respected. Bell reminders must not be sent after their useful moment has passed.
 5. The API is unofficial. Add a fixture and tests for each newly discovered response shape. Do not invent endpoint support or claim a field exists without evidence.
 6. Prefer small reversible commits. Run tests and inspect `git diff --check` before committing. Update README and this guide when behavior changes.
+7. Homework attachments come from `GET /api/v4/os/clientoffice/homeworks/simple-homework/info` with `homeworkUuid`, `schoolId`, `eduYear`. Live responses contain `files[]` entries with `name`, `extension`, `sizeInBytes`, and short-lived `link` on `storage.yandexcloud.kz`. The bot resolves list/send callback indexes against fresh diary data and streams after a deliberate tap. Keep the 49 MB cap and private-chat check.
 
 ## Definition of done for a feature
 

@@ -19,6 +19,7 @@ from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
 
 from .bot_store import BotStore
+from .attachments import AttachmentError, StreamedAttachment, file_name, file_size, size_label
 from .automation import due_bells, quiet_now
 from .bot_views import (advice_view, attendance_view, dashboard_view, day,
                         grades_view, h, marks_view, parse_day, schedule_view,
@@ -81,11 +82,11 @@ def date_keyboard(mode, offset):
         move.append(("← День", f"view:{mode}:{offset-1}"))
     if offset < MAX_DAY_OFFSET:
         move.append(("День →", f"view:{mode}:{offset+1}"))
-    return buttons(
-        [(f"{'• ' if mode == key else ''}{label}", f"view:{key}:{offset}") for key, label in modes],
-        move,
-        [("🏠 Меню", "view:home"), ("🗓 Неделя", f"view:week:{week_offset}")],
-    )
+    rows = [[(f"{'• ' if mode == key else ''}{label}", f"view:{key}:{offset}") for key, label in modes]]
+    if mode == "homework":
+        rows.append([("📎 Файлы к заданиям", f"files:list:{offset}")])
+    rows.extend((move, [("🏠 Меню", "view:home"), ("🗓 Неделя", f"view:week:{week_offset}")]))
+    return buttons(*rows)
 
 
 def week_keyboard(week_offset):
@@ -163,6 +164,83 @@ def fetch(chat_id, kind, offset=0, year=None):
         raise ValueError("Unknown view")
     finally:
         client.session.close()
+
+
+def homework_attachments(chat_id, offset, lesson_index=None, file_index=None):
+    """Resolve callback indexes afresh; signed links are never kept in SQLite or callbacks."""
+    user = store.user(chat_id)
+    client = new_client(user)
+    try:
+        target = datetime.now(TZ).date() + timedelta(days=offset)
+        monday = target - timedelta(days=target.weekday())
+        selected = day(client.get_schedule(monday.strftime("%d.%m.%Y")), target) or {}
+        lessons = selected.get("subjects") or []
+        if lesson_index is not None:
+            if not 0 <= lesson_index < len(lessons):
+                raise AttachmentError("Урок больше не найден. Открой ДЗ заново.")
+            lesson = lessons[lesson_index]
+            files = client.get_homework_files(lesson.get("homeworkUuid"))
+            if file_index is None or not 0 <= file_index < len(files):
+                raise AttachmentError("Файл больше не найден. Открой список заново.")
+            return lesson.get("label") or "Урок", files[file_index]
+        result = []
+        for index, lesson in enumerate(lessons):
+            if lesson.get("hasFiles") and lesson.get("homeworkUuid"):
+                for position, metadata in enumerate(client.get_homework_files(lesson["homeworkUuid"])):
+                    result.append((index, position, lesson.get("label") or "Урок", metadata))
+        return result
+    finally:
+        client.session.close()
+
+
+@router.callback_query(F.data.startswith("files:"))
+async def files(call: CallbackQuery):
+    if call.message.chat.type != "private":
+        await call.answer()
+        return
+    if not store.user(call.message.chat.id):
+        await call.answer("Сначала подключи дневник", show_alert=True)
+        return
+    offset = 0
+    try:
+        parts = call.data.split(":")
+        action = parts[1]
+        offset = int(parts[2])
+        if not -MAX_DAY_OFFSET <= offset <= MAX_DAY_OFFSET:
+            raise ValueError
+        if action == "list" and len(parts) == 3:
+            await call.answer("Ищу файлы…")
+            entries = await asyncio.to_thread(homework_attachments, call.message.chat.id, offset)
+            if not entries:
+                await present(call, "<b>📎 Файлы к ДЗ</b>\nНа этот день вложений нет.", buttons([("← К ДЗ", f"view:homework:{offset}")]))
+                return
+            rows = []
+            for lesson_index, file_index, subject, metadata in entries[:40]:
+                try:
+                    label = f"{subject} · {file_name(metadata)} · {size_label(file_size(metadata))}"
+                except AttachmentError:
+                    label = f"{subject} · файл без размера"
+                rows.append([(label[:60], f"files:send:{offset}:{lesson_index}:{file_index}")])
+            rows.append([("← К ДЗ", f"view:homework:{offset}")])
+            extra = "\nПоказаны первые 40 файлов." if len(entries) > 40 else ""
+            await present(call, f"<b>📎 Файлы к ДЗ</b>\nНажми на файл — отправлю его сюда. На сервере файлы не сохраняются.{extra}", buttons(*rows))
+            return
+        if action == "send" and len(parts) == 5:
+            lesson_index, file_index = int(parts[3]), int(parts[4])
+            if not 0 <= lesson_index < 100 or not 0 <= file_index < 100:
+                raise ValueError
+            await call.answer("Отправляю файл…")
+            subject, metadata = await asyncio.to_thread(homework_attachments, call.message.chat.id, offset, lesson_index, file_index)
+            document = StreamedAttachment(metadata)
+            await call.message.answer_document(document, caption=f"📎 <b>{h(subject)}</b>\n{h(document.filename)}", protect_content=True)
+            return
+        raise ValueError
+    except AttachmentError as exc:
+        await call.message.answer(h(str(exc)), reply_markup=buttons([("← К ДЗ", f"view:homework:{offset}")]), protect_content=True)
+    except Exception as exc:
+        # aiohttp errors may include a signed storage URL; never log its traceback.
+        logger.warning("Attachment delivery failed for chat %s (%s)", call.message.chat.id, type(exc).__name__)
+        await call.message.answer("Не удалось отправить файл. Открой список заново или попробуй позже.", reply_markup=buttons([("← К ДЗ", f"view:homework:{offset}")]), protect_content=True)
 
 
 def private(message):

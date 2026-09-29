@@ -10,7 +10,9 @@ from zoneinfo import ZoneInfo
 from cryptography.fernet import Fernet
 
 from bilim_neo.automation import due_bells, first_bell, quiet_now
+from bilim_neo.attachments import AttachmentError, MAX_FILE_BYTES, StreamedAttachment, file_name, file_size, file_url
 from bilim_neo.bot_store import BotStore
+from bilim_neo.client import BilimClassClient
 from bilim_neo.bot_views import schedule_view, marks_view, advice_view, dashboard_view, day, parse_day, week_view
 from bilim_neo import bot
 
@@ -70,6 +72,8 @@ class ViewsTest(unittest.TestCase):
                         for row in bot.week_keyboard(8).inline_keyboard for button in row
                         if button.callback_data.startswith("view:day:")]
         self.assertTrue(all(abs(offset) <= bot.MAX_DAY_OFFSET for offset in distant_days))
+        attachment = [button.callback_data for row in bot.date_keyboard("homework", 0).inline_keyboard for button in row]
+        self.assertIn("files:list:0", attachment)
 
     def test_callbacks_route_to_the_selected_view(self):
         fake_store = SimpleNamespace(user=lambda chat_id: {"profile": {"currentEduYear": 2026}})
@@ -102,6 +106,59 @@ class AutomationTest(unittest.TestCase):
         self.assertEqual(first_bell("08:00–08:45"), (8, 0))
         self.assertEqual(len(due_bells(SCHEDULE["days"][0]["subjects"], now)), 1)
         self.assertEqual(due_bells(SCHEDULE["days"][0]["subjects"], now.replace(minute=51)), [])
+
+
+class AttachmentTest(unittest.TestCase):
+    def test_client_reads_homework_file_shape(self):
+        client = BilimClassClient()
+        client.school_id = 7
+        client.current_edu_year = 2026
+        fixture = {"data": {"files": [{"name": "lesson.pdf", "sizeInBytes": 1200,
+                                          "link": "https://storage.yandexcloud.kz/file"}], "books": []}}
+        response = SimpleNamespace(raise_for_status=lambda: None, json=lambda: fixture)
+        with patch.object(client.session, "get", return_value=response) as get:
+            self.assertEqual(client.get_homework_files("homework-uuid"), fixture["data"]["files"])
+            self.assertEqual(get.call_args.kwargs["params"], {"homeworkUuid": "homework-uuid", "schoolId": 7, "eduYear": 2026})
+        client.session.close()
+
+    def test_metadata_is_validated_before_upload(self):
+        metadata = {"name": "../задание", "extension": "pdf", "sizeInBytes": 1200,
+                    "link": "https://storage.yandexcloud.kz/bucket/file?X-Amz-Signature=private"}
+        self.assertEqual(file_name(metadata), "_задание.pdf")
+        self.assertEqual(file_size(metadata), 1200)
+        self.assertIsInstance(StreamedAttachment(metadata), StreamedAttachment)
+        with self.assertRaises(AttachmentError):
+            file_size({**metadata, "sizeInBytes": MAX_FILE_BYTES + 1})
+        with self.assertRaises(AttachmentError):
+            file_url({**metadata, "link": "http://127.0.0.1/file"})
+        with self.assertRaises(AttachmentError):
+            file_url({**metadata, "link": "https://storage.yandexcloud.kz.evil.test/file"})
+
+    def test_stream_stops_when_remote_size_exceeds_limit(self):
+        metadata = {"name": "a.pdf", "sizeInBytes": 100,
+                    "link": "https://storage.yandexcloud.kz/bucket/a.pdf"}
+
+        class Response:
+            status = 200
+            headers = {"Content-Length": str(MAX_FILE_BYTES + 1)}
+            def raise_for_status(self): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): pass
+
+        class Session:
+            def get(self, *args, **kwargs):
+                self.kwargs = kwargs
+                return Response()
+
+        session = Session()
+        fake_bot = SimpleNamespace(session=SimpleNamespace(create_session=AsyncMock(return_value=session)))
+
+        async def read():
+            return [chunk async for chunk in StreamedAttachment(metadata).read(fake_bot)]
+
+        with self.assertRaises(AttachmentError):
+            asyncio.run(read())
+        self.assertFalse(session.kwargs["allow_redirects"])
 
 
 class StoreTest(unittest.TestCase):

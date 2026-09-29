@@ -163,6 +163,23 @@ class BilimClassClient:
         resp.raise_for_status()
         return resp.json().get("data", {})
 
+    def get_homework_files(self, homework_uuid: str) -> List[Dict[str, Any]]:
+        """Current attachment metadata and short lived links for one homework item."""
+        if not homework_uuid:
+            return []
+        url = f"{self.BASE_URL}/api/v4/os/clientoffice/homeworks/simple-homework/info"
+        resp = self.session.get(url, params={
+            "homeworkUuid": homework_uuid,
+            "schoolId": self.school_id,
+            "eduYear": self.current_edu_year,
+        }, timeout=15)
+        resp.raise_for_status()
+        data = resp.json().get("data") or {}
+        files = data.get("files") or []
+        if not isinstance(files, list):
+            raise RuntimeError("BilimClass returned invalid homework files")
+        return files
+
     def get_periods(self, edu_year: Optional[int] = None) -> List[Dict[str, Any]]:
         """Получить список учебных периодов (четвертей)."""
         year = edu_year or self.current_edu_year
